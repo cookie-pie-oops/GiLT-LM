@@ -1,3 +1,4 @@
+import copy
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -7,6 +8,7 @@ from masking_bllip import masking_types as types
 import time
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
+
 class MLPforBiaffine(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(MLPforBiaffine, self).__init__()
@@ -29,7 +31,7 @@ class MLPforBiaffine(nn.Module):
         return x
 
 class BiaffineAttention(nn.Module):
-    def __init__(self, d_model, input_dim):
+    def __init__(self, d_model, input_dim, type="default"):
         super(BiaffineAttention, self).__init__()
 
         self.input_dim = input_dim
@@ -38,19 +40,29 @@ class BiaffineAttention(nn.Module):
         self.V = nn.Parameter(torch.Tensor(1, input_dim))
         self.U = nn.Parameter(torch.Tensor(1, input_dim))
         self.bias = nn.Parameter(torch.Tensor(1))
+        self.type = type
 
         # self.f_1 = MLPforBiaffine(d_model, input_dim)
         # self.f_2 = MLPforBiaffine(d_model, input_dim)
-        self.softmax = nn.Softmax(dim=-1)
+        if type == "default":
+            self.softmax = nn.Softmax(dim=-1)
+        elif type == "Multi":
+            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim))
+            self.softmax = nn.Sigmoid()
 
         # nn.init.xavier_uniform_(self.W.weight)
         nn.init.xavier_uniform_(self.U)
         nn.init.xavier_uniform_(self.V)
+        nn.init.xavier_uniform_(self.root_representation)
         nn.init.zeros_(self.bias)
     
     def forward(self, input1, input2): # 1*d, l*d
         # input1 = self.f_1(input1) #1*d
         # input2 = self.f_2(input2) #l*d
+        if self.type == "Multi":
+            B = input2.size(0)
+            root_tokens = self.root_representation.repeat(B, 1, 1)
+            input2 = torch.cat((root_tokens, input2), dim=1)
 
         H_2 = self.W(input2) # d*l
         score = torch.matmul(input1, H_2.transpose(1,2))  # b1d * bdl = b1l
@@ -60,7 +72,7 @@ class BiaffineAttention(nn.Module):
 
         score += self.bias  # b,1,l
         score = score.to(torch.float64)
-        score = self.softmax(score)
+        score = self.softmax(score)   
         return score
 
 class PositionalEmbedding(nn.Module):
@@ -194,7 +206,8 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
 
-    def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
+    def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
+        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, use_graph=False):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)  # L, M-m, B
         # print(qlen, rlen)
         # r: M-m * None * d_model
@@ -213,10 +226,20 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 w_heads = self.qkv_net(self.layer_norm(w))
             else:
                 # print(w.shape)
+                # if use_graph:
+                #     # graphlayer
+                #     attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
+                #     attn_relpos = torch.zeros_like(attn_relpos)
+                #     attn_relpos = (max_len - attn_relpos).long()
+                #     attn_relpos = attn_relpos.permute(1, 0)
+                #     r_squeezed = r.squeeze(1)
+                #     d = r_squeezed[attn_relpos]
+                #     w_graphlayer = self.qkv_net(w + d)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
             
             w_head_q, w_head_k, w_head_v = torch.chunk(w_heads, 3, dim=-1)
+            # _, w_head_k, _ = torch.chunk(w_graphlayer, 3, dim=-1)
         # #test    
         # r_heads = self.qkv_net(r)
         # r_head_q, r_head_k, r_head_v = torch.chunk(r_heads, 3, dim=-1)
@@ -253,6 +276,13 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # if composed and rlen == qlen:
         #     BD = torch.einsum('ibnd,jbnd->ijbn', (rr_head_q, r_head_k))         # qlen x rlen x bsz x n_head
         # else:
+        # if use_graph:
+        #     _, w_k_graphlayer, _ = torch.chunk(w_graphlayer, 3, dim=-1)
+        #     w_k_graphlayer = w_k_graphlayer.view(klen, bsz, self.n_head, self.d_head)
+        #     r_head_k = r_head_k.unsqueeze(1).repeat(1,bsz,1,1)
+        #     r_head_k = r_head_k + w_k_graphlayer
+        #     BD = torch.einsum('ibnd,jbnd->ijbn', (rr_head_q, r_head_k))
+        # else:
         BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, r_head_k))              # qlen x rlen x bsz x n_head
         # logger.info("BD: %s", str(BD.shape))
         if attn_relpos is None:
@@ -260,6 +290,8 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         else:
             # BD = self._rel_shift(BD)
             attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
+            # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
+            # attn_relpos = 10 * torch.ones_like(attn_relpos)
             # print(attn_relpos.shape)
             # print(attn_relpos.min(), attn_relpos.max())
             # print(attn_relpos[0])
@@ -270,7 +302,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             # print(relpos_one_hot.shape)
             attn_relpos = attn_relpos.permute(1, 2, 0)
 
-            BD = BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+            BD = self._rel_shift(BD) + BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
             # BD = torch.einsum('ijbn,bisj->isbn', BD, relpos_one_hot)                # qlen x klen x bsz x n_head
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
@@ -323,18 +355,18 @@ class TransformerGrammarLayer(nn.Module):
                             d_head, dropouta, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
-    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
+    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False, use_graph=False):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, cache=cache)
+                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, cache=cache, use_graph=use_graph)
             output = self.pos_ff(output)
 
             return output, new_key, new_value
         else:
             output = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values)
+                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, use_graph=use_graph)
             output = self.pos_ff(output)
             
             return output
@@ -396,7 +428,8 @@ class TransformerGrammar(nn.Module):
         self.left_arc2 = left_arc2
         self.right_arc2 = right_arc2
 
-    def forward(self, x, startofword_x, length, use_mask=None, document_level=False, return_h=False, max_relative_length=None, min_relative_length=None, iseval=False):
+    def forward(self, x, startofword_x, length, use_mask=None, document_level=False, return_h=False,
+        max_relative_length=None, min_relative_length=None, iseval=False, sents_index_to_id=None, sents_arrow=None):
         
         attn_mask = []
         attn_relpos = []
@@ -422,6 +455,136 @@ class TransformerGrammar(nn.Module):
                 attn_mask = torch.tril(torch.ones((length_i, length_i), dtype = torch.uint8)).bool() 
 
             attn_mask = attn_mask.unsqueeze(0).expand(batch, -1, -1)
+            attn_relpos = None
+
+        elif use_mask == 'graphlayer':
+            max_graphlayer_rel = 0
+            length_i = max([len(sent) for sent in x])
+            for sent in x:
+                src_ = sent[:-1]
+                tgt_ = sent[1:]
+                src_p = src_ + [self.pad_id] * (length_i - len(src_))
+                inputs.append(np.array(src_p))
+                tgt_p = tgt_ + [self.pad_id] * (length_i - len(tgt_))
+                targets.append(np.array(tgt_p))
+            if torch.cuda.is_available():
+                inputs = torch.LongTensor(np.array(inputs)).cuda()
+                targets = torch.LongTensor(np.array(targets)).cuda()
+                attn_mask = torch.tril(torch.ones((length_i, length_i), dtype = torch.uint8)).cuda().bool()
+            else:
+                inputs = torch.LongTensor(np.array(inputs))
+                targets = torch.LongTensor(np.array(targets))
+                attn_mask = torch.tril(torch.ones((length_i, length_i), dtype = torch.uint8)).bool() 
+
+            attn_mask = attn_mask.unsqueeze(0).expand(batch, -1, -1)
+
+            left_sents_arrow, right_sents_arrow = sents_arrow
+
+            attn_relpos = []
+            for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
+                Degree_out = [0]*(length_i + 1)
+                Degree_in = [0]*(length_i + 1)
+                graph = np.zeros((length_i + 1, length_i + 1))
+                sent_attn_relpos = []
+                for i in range(len(left_sent_arrow)):
+                    if left_sent_arrow[i]:  #i <- j
+                        for j in left_sent_arrow[i]:
+                            graph[j][i + 1] = 1
+                            Degree_out[j - 1] += 1
+                            Degree_in[i] += 1
+                    if right_sent_arrow[i]: #i -> j
+                        for j in right_sent_arrow[i]:
+                            graph[i + 1][j] = 1
+                            Degree_in[j - 1] += 1
+                            Degree_out[i] += 1
+                    sent_attn_relpos.append(copy.deepcopy(5 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1])))
+                max_graphlayer_rel = max(Degree_out[:-1])
+                for j in range(length_i - len(sent_attn_relpos)):
+                    sent_attn_relpos.append([0]*(length_i))
+                attn_relpos.append(sent_attn_relpos)
+                # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
+            
+            attn_relpos = torch.LongTensor(np.array(attn_relpos))
+            if torch.cuda.is_available():
+                attn_relpos = attn_relpos.cuda()
+
+        elif use_mask == 'sdp_arc':
+            assert sents_index_to_id is not None and sents_arrow is not None
+            index_dict = {"bos_id": self.bos_id, "vocab_size": self.vocab_size, "pad_id": self.pad_id,
+                "left_arc": self.left_arc, "right_arc": self.right_arc, "left_arc2": self.left_arc2, "right_arc2": self.right_arc2}
+            length_i = max([len(sent) for sent in x])
+            for sent, sent_startofword, sent_index_to_id, sent_arrow in zip(x, startofword_x, sents_index_to_id, sents_arrow):
+                id_to_index = {}
+                for i in range(len(sent_index_to_id)):
+                    if sent_index_to_id[i] != -1 and sent_index_to_id[i] not in id_to_index:
+                        id_to_index[sent_index_to_id[i]] = i
+                
+                # src_ = torch.LongTensor(sent[:-1])
+                # tgt_ = torch.LongTensor(sent[1:])
+                # src_startofword = torch.LongTensor(sent_startofword[:-1])
+                # tgt_startofword = torch.LongTensor(sent_startofword[1:])
+                src_ = sent[:-1]
+                tgt_ = sent[1:]
+                src_p = src_ + [self.pad_id] * (length_i - len(src_))
+                tgt_p = tgt_ + [self.pad_id] * (length_i - len(tgt_))
+
+                mask = torch.tril(torch.ones((len(src_p), len(src_p)), dtype = torch.uint8)).bool()
+                Tree_structure = masking_utils.UnionFind(len(src_p))
+                false_position_list = []
+                for i in range(len(src_p)):
+                    if src_p[i] == self.pad_id:
+                        break
+                    if src_p[i] == self.left_arc or src_p[i] == self.right_arc:
+                        mask[i][:] = False
+                        arrow_word_start = id_to_index[sent_arrow[i]]
+                        arrow_words_end = arrow_word_start + 1
+                        while sent_index_to_id[arrow_words_end] == sent_arrow[i]:
+                            arrow_words_end += 1
+                        mask[i][arrow_word_start:arrow_words_end] = True
+
+                        pos = i - 1
+                        while sent_index_to_id[pos] == -1 and pos not in id_to_index.values():
+                            pos -= 1
+                        end_predicate = pos + 1
+                        while pos not in id_to_index.values():
+                            pos -= 1
+                        start_predicate = pos
+
+                        Tree_structure.attn_bool[arrow_word_start:arrow_words_end] = [False] * (arrow_words_end - arrow_word_start)
+                        Tree_structure.attn_bool[start_predicate:end_predicate] = [False] * (end_predicate - start_predicate)
+                        # Tree_structure.union(i, id_to_index[sent_arrow[i]]) #arc token and parent token also set False
+                        # for idx in range(start_predicate, end_predicate, 1):
+                            # Tree_structure.union(idx, id_to_index[sent_arrow[i]]) #compose here and use it later 
+                        mask[i][start_predicate:end_predicate] = True
+                        if src_p[i] == self.left_arc:
+                            predicate_id = [k for k, v in id_to_index.items() if v == pos][0]
+                            id_to_index[predicate_id] = i
+                        else:
+                            id_to_index[sent_arrow[i]] = i
+                        mask[i][i] = True
+                    elif src_p[i] == self.left_arc2 or src_p[i] == self.right_arc2:
+                        false_position_list = Tree_structure.Get_false_position(i)
+                        Tree_structure.attn_bool[i] = False
+                        for false_pos in false_position_list:
+                            mask[i][false_pos] = False
+                        false_position_list.append(i)
+                    else:
+                        for false_pos in false_position_list:
+                            mask[i][false_pos] = False
+                
+                attn_mask.append(np.array(mask))
+                inputs.append(np.array(src_p))
+                targets.append(np.array(tgt_p))
+
+            if torch.cuda.is_available():
+                inputs = torch.LongTensor(np.array(inputs)).cuda()
+                targets = torch.LongTensor(np.array(targets)).cuda()
+                attn_mask = torch.LongTensor(np.array(attn_mask)).cuda().bool()
+            else:
+                inputs = torch.LongTensor(np.array(inputs))
+                targets = torch.LongTensor(np.array(targets))
+                attn_mask = torch.LongTensor(np.array(attn_mask)).bool()
+            
             attn_relpos = None
         
         elif use_mask == 'txl' or use_mask == 'txl_arc':
@@ -550,8 +713,10 @@ class TransformerGrammar(nn.Module):
         
         word_emb = self.emb(inputs)
         
-        if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None":
+        if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None" or use_mask == 'sdp_arc' or use_mask == 'graphlayer':
             pos_emb = self.pos_emb(torch.arange(seq_len-1, -1, -1.0, device=word_emb.device))
+            max_relative_length = seq_len - 1
+            min_relative_length = 0
         else:
             if max_relative_length is None:
                 max_relative_length = seq_len
@@ -566,7 +731,8 @@ class TransformerGrammar(nn.Module):
         hiddens = []
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
-            core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask, attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length)
+            core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
+                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length, use_graph=True)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)

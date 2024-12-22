@@ -112,3 +112,41 @@ def compute_token_types(
         else:
             inp[f"{key}_ttypes"] = np.zeros_like(inp[key])
     return inp
+
+class UnionFind:
+    def __init__(self, size):
+        self.parent = list(range(size))
+        self.rank = [1] * size
+        self.attn_bool = [True] * size
+
+    def find(self, p):
+        if self.parent[p] != p:
+            self.parent[p] = self.find(self.parent[p])  # Path compression
+        return self.parent[p]
+
+    def union(self, p, q): #p->q
+        # rootP = self.find(p)
+        # rootQ = self.find(q)
+
+        # if rootP != rootQ:
+        #     if self.rank[rootP] > self.rank[rootQ]:
+        #         self.parent[rootQ] = rootP
+        #     elif self.rank[rootP] < self.rank[rootQ]:
+        #         self.parent[rootP] = rootQ
+        #     else:
+        #         self.parent[rootQ] = rootP
+        #         self.rank[rootP] += 1
+
+        self.attn_bool[q] = False
+        self.attn_bool[p] = False
+
+    def connected(self, p, q):
+        return self.find(p) == self.find(q)
+    
+    def Get_false_position(self, i):
+        false_list = []
+        for idx in range(i):
+            if self.attn_bool[idx] == False:
+                false_list.append(idx)
+            
+        return false_list

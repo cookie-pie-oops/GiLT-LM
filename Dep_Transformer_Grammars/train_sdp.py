@@ -210,7 +210,6 @@ def weights_init(m):
             fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
             nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
 
-
 def get_span(hidden, index_to_id, idx):
     arc_pos = idx
     while idx > 0:
@@ -276,7 +275,7 @@ def eval(data, index_to_id, arrow,startofword, model, biaffine_model, length, le
             mems = tuple()
             
             ret, hidden = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
-                        args.max_relative_length, args.min_relative_length)
+                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
             hidden = hidden.transpose(0, 1)
             batch_words_input = hidden_alignment(hidden, sents_index_to_id)
 
@@ -378,9 +377,9 @@ def main(args):
     else:
         logger.info(f"loading model from {args.model_file}")
         if torch.cuda.is_available():
-            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'))
-        else:
             checkpoint = torch.load(args.model_file)
+        else:
+            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'))
         if 'biaffine_model' in checkpoint:
             biaffine_model = checkpoint['biaffine_model']
             logger.info("Load exist biaffine model")
@@ -499,9 +498,9 @@ def main(args):
             # model.eval()
             # with torch.no_grad():
             #     ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
-            #             args.max_relative_length, args.min_relative_length)
+            #             args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
             ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
-                        args.max_relative_length, args.min_relative_length)
+                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
 
             hidden = hidden.transpose(0, 1)
             batch_words_input = hidden_alignment(hidden, sents_index_to_id)
@@ -594,10 +593,10 @@ def main(args):
 
                 # logger.info(f"dev data evaluation ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
             
-            if train_step % args.eval_interval == 0:
+            if train_step % args.eval_interval == 0 or i == len(train_data) - 1:
                 val_ppl, val_acc = eval(dev_data, dev_index_to_id, dev_arrow, startofword_dev, model, biaffine_model, dev_length, left_arc, right_arc, args=args)
 
-                if val_ppl < best_val_ppl or val_acc > best_val_acc:
+                if val_ppl < best_val_ppl:
                     remaining_epoch = 0
                     best_val_ppl = val_ppl
                     best_val_acc = val_acc
