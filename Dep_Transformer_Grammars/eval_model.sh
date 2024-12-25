@@ -1,13 +1,16 @@
 #!/bin/bash
+export DATASET=psd
 python eval_model.py \
-    --dev_file ../data_process/arc_with_point/BLLIP_LG_DEV_SPM_ARC_pas.txt \
-    --test_file ../data_process/arc_with_point/BLLIP_LG_TEST_SPM_ARC_pas.txt \
+    --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
+    --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
+    --dev_arrow_file ../data_process/transition_sequence/BLLIP_LG_DEV_$DATASET\_multiarrow.txt \
+    --test_arrow_file ../data_process/transition_sequence/BLLIP_LG_TEST_$DATASET\_multiarrow.txt \
     --log_file logs/eval.txt \
-    --vocab_file ../data_process/BLLIP_spm.vocab \
-    --model_file models/standard_arc_pas_txl_seed_4.pt \
+    --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
+    --model_file models/graphlayer_small_$DATASET\_4_100:1_WkD_zero.pt \
     --sentence_level \
     --emb_lr_multiplier 2.0 \
-    --attn_mask txl_arc \
+    --attn_mask graphlayer \
     --gpu 0 \
     --batch_size 64 \
     --w_dim 1024 \

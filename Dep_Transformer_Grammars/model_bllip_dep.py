@@ -226,15 +226,6 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 w_heads = self.qkv_net(self.layer_norm(w))
             else:
                 # print(w.shape)
-                # if use_graph:
-                #     # graphlayer
-                #     attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
-                #     attn_relpos = torch.zeros_like(attn_relpos)
-                #     attn_relpos = (max_len - attn_relpos).long()
-                #     attn_relpos = attn_relpos.permute(1, 0)
-                #     r_squeezed = r.squeeze(1)
-                #     d = r_squeezed[attn_relpos]
-                #     w_graphlayer = self.qkv_net(w + d)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
             
@@ -276,34 +267,37 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # if composed and rlen == qlen:
         #     BD = torch.einsum('ibnd,jbnd->ijbn', (rr_head_q, r_head_k))         # qlen x rlen x bsz x n_head
         # else:
-        # if use_graph:
-        #     _, w_k_graphlayer, _ = torch.chunk(w_graphlayer, 3, dim=-1)
-        #     w_k_graphlayer = w_k_graphlayer.view(klen, bsz, self.n_head, self.d_head)
-        #     r_head_k = r_head_k.unsqueeze(1).repeat(1,bsz,1,1)
-        #     r_head_k = r_head_k + w_k_graphlayer
-        #     BD = torch.einsum('ibnd,jbnd->ijbn', (rr_head_q, r_head_k))
-        # else:
         BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, r_head_k))              # qlen x rlen x bsz x n_head
         # logger.info("BD: %s", str(BD.shape))
-        if attn_relpos is None:
+        if attn_relpos is None or use_graph:
+            if use_graph:
+                attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
+                # attn_relpos = torch.zeros_like(attn_relpos)
+                attn_relpos = (max_len - attn_relpos).long()
+                attn_relpos = attn_relpos.permute(1, 2, 0)
+                r_squeezed = r.squeeze(1)
+                d = r_squeezed[attn_relpos]
+                w2 = w.unsqueeze(1)
+                w2 = w2.repeat(1, qlen, 1, 1)
+                w_graphlayer = self.qkv_net(w2 + d)
+
+                _, w_k_graphlayer, _ = torch.chunk(w_graphlayer, 3, dim=-1)
+                w_k_graphlayer = w_k_graphlayer.view(klen, rlen, bsz, self.n_head, self.d_head)
+                # r_head_k = r_head_k.unsqueeze(1).repeat(1,bsz,1,1)
+                # r_head_k = r_head_k + w_k_graphlayer
+                Moderate_BD = torch.einsum('ibnd,ijbnd->ijbn',(w_head_q, w_k_graphlayer))
+                BD = Moderate_BD + BD
             BD = self._rel_shift(BD)
         else:
             # BD = self._rel_shift(BD)
             attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
             # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
             # attn_relpos = 10 * torch.ones_like(attn_relpos)
-            # print(attn_relpos.shape)
-            # print(attn_relpos.min(), attn_relpos.max())
-            # print(attn_relpos[0])
             attn_relpos = (max_len - attn_relpos).long()
-            # print(rlen)
-            # print(attn_relpos.size(0), rlen)
-            # relpos_one_hot = torch.Tensor(F.one_hot(attn_relpos, num_classes=rlen)).float()               # bsz x qlen x klen x rlen
-            # print(relpos_one_hot.shape)
             attn_relpos = attn_relpos.permute(1, 2, 0)
-
             BD = self._rel_shift(BD) + BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-            # BD = torch.einsum('ijbn,bisj->isbn', BD, relpos_one_hot)                # qlen x klen x bsz x n_head
+            # BD = torch.einsum('ijbn,bisj->isbn', BD, relpos_one_hot)  
+                          # qlen x klen x bsz x n_head
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
         attn_score = AC + BD
@@ -497,7 +491,12 @@ class TransformerGrammar(nn.Module):
                             graph[i + 1][j] = 1
                             Degree_in[j - 1] += 1
                             Degree_out[i] += 1
-                    sent_attn_relpos.append(copy.deepcopy(5 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1])))
+                    rel_pos_1 = Degree_out[:-1]
+                    rel_pos_2 = Degree_in[:-1]
+                    # Wk R
+                    rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]
+                    rel_pos_2 = rel_pos_2[(i+1):] + rel_pos_2[:(i+1)]
+                    sent_attn_relpos.append(copy.deepcopy(10 * np.array(rel_pos_1) + 1 * np.array(rel_pos_2)))
                 max_graphlayer_rel = max(Degree_out[:-1])
                 for j in range(length_i - len(sent_attn_relpos)):
                     sent_attn_relpos.append([0]*(length_i))
@@ -710,7 +709,6 @@ class TransformerGrammar(nn.Module):
 
         seq_len = inputs.size(0)
 
-        
         word_emb = self.emb(inputs)
         
         if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None" or use_mask == 'sdp_arc' or use_mask == 'graphlayer':
@@ -749,7 +747,7 @@ class TransformerGrammar(nn.Module):
         #     tgt_seq = targets.permute(1, 0).contiguous()
         #     import sentencepiece as spm
         #     sp = spm.SentencePieceProcessor()
-        #     sp.load('../data_process/BLLIP_spm.model')
+        #     sp.load('../data_process/spm_parsing/BLLIP_spm.model')
         #     for i in range(len(pred_seq)):
         #         if 2 in pred_seq[i]:
         #             index = torch.where(pred_seq[i] == 2)[0][0]

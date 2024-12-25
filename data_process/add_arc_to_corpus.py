@@ -51,7 +51,7 @@ def tok_with_arc(graph, tok, text, arc=False):
         col = graph_matrix[0:i, i]
 
         if arc:
-            for index, arc_exist in enumerate(row): #(i -> i-j)
+            for index, arc_exist in enumerate(row): #(i -> j)
                 if arc_exist == 1:
                     if index == 0:
                         graph_tok.insert(i + arc_num, "-> root")
@@ -60,7 +60,7 @@ def tok_with_arc(graph, tok, text, arc=False):
                         graph_tok.insert(i + arc_num, "-> " + word_piece_tok[index - 1])
                     arc_num += 1
             
-            for index, arc_exist in enumerate(col): #(i-j -> i)
+            for index, arc_exist in enumerate(col): #(j -> i)
                 if arc_exist == 1:
                     if index == 0:
                         graph_tok.insert(i + arc_num, "<- root")
@@ -68,7 +68,7 @@ def tok_with_arc(graph, tok, text, arc=False):
                         graph_tok.insert(i + arc_num, "<- " + word_piece_tok[index - 1])
                     arc_num += 1
         else:
-            for index, arc_exist in enumerate(row): #(i -> i-j)
+            for index, arc_exist in enumerate(row): #(i -> j)
                 if arc_exist == 1:
                     if index == 0:
                         graph_tok.insert(i + arc_num, "-> ->2") #0
@@ -77,7 +77,7 @@ def tok_with_arc(graph, tok, text, arc=False):
                         graph_tok.insert(i + arc_num, "-> ->2") #index - 1
                     arc_num += 1
             
-            for index, arc_exist in enumerate(col): #(i-j -> i)
+            for index, arc_exist in enumerate(col): #(j -> i)
                 if arc_exist == 1:
                     if index == 0:
                         graph_tok.insert(i + arc_num, "<- <-2")
