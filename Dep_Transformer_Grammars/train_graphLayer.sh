@@ -1,6 +1,7 @@
 #!/bin/bash
 export DATASET=psd
 # --model_file models/graphlayer_small_$DATASET\_4_100:1_10Do+Di.pt \
+# 1.5e-4
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
@@ -8,16 +9,16 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/transition_sequence/BLLIP_LG_TRAIN_$DATASET\_multiarrow.txt \
     --dev_arrow_file ../data_process/transition_sequence/BLLIP_LG_DEV_$DATASET\_multiarrow.txt \
     --test_arrow_file ../data_process/transition_sequence/BLLIP_LG_TEST_$DATASET\_multiarrow.txt \
-    --log_file logs/log_graphlayer_large_$DATASET\_4_100:1_10Do+Di.txt \
+    --log_file logs/log_graphlayer_small_$DATASET\_4_100:1_WkD.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_large_$DATASET\_4_100:1_10Do+Di.pt \
-    --dataset large \
+    --save_path models/graphlayer_small_$DATASET\_4_100:1_WkD.pt \
+    --dataset mini \
     --attn_mask graphlayer \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
     --return_h \
     --gpu 0 \
-    --batch_size 64 \
+    --batch_size 8 \
     --w_dim 1024 \
     --n_head 8 \
     --d_head 128 \
@@ -36,7 +37,7 @@ python train_graphLayer.py \
     --scheduler cosine \
     --optimizer adamw \
     --start_lr 1e-7 \
-    --max_lr 1.5e-4 \
+    --max_lr 5e-5 \
     --eta_min 3e-7 \
     --stable_lr 3e-7 \
     --lr_warm_step 8000 \

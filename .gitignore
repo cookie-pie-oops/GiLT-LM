@@ -5,6 +5,7 @@
 /Dataset
 /data_process/parser
 /data_process/spm
+/data_process/spm_parsing
 /data_process/token_level
 /data_process/token_level_vocab
 /data_process/transition_sequence
