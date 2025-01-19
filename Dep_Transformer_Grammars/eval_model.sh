@@ -7,7 +7,8 @@ python eval_model.py \
     --test_arrow_file ../data_process/transition_sequence/BLLIP_LG_TEST_$DATASET\_multiarrow.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_$DATASET\_4_100:1_WkD_zero.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:100_degree_standard.pt \
+    --rel_type degree \
     --sentence_level \
     --emb_lr_multiplier 2.0 \
     --attn_mask graphlayer \

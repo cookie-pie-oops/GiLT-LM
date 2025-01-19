@@ -1,4 +1,5 @@
 import copy
+import heapq
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -8,6 +9,113 @@ from masking_bllip import masking_types as types
 import time
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
+
+
+def dijkstra(adj_matrix, start):
+    n = len(adj_matrix)
+    distances = [float('inf')] * n
+    distances[start] = 0
+    visited = [False] * n
+    pq = [(0, start)]  # priority queue
+
+    while pq:
+        curr_dist, curr_vertex = heapq.heappop(pq)  # pop the vertex with the smallest distance
+
+        if visited[curr_vertex]:
+            continue
+
+        visited[curr_vertex] = True
+
+        for neighbor in range(n):
+            if adj_matrix[curr_vertex][neighbor] != 0 and not visited[neighbor]:
+                new_dist = curr_dist + adj_matrix[curr_vertex][neighbor]
+                if new_dist < distances[neighbor]:
+                    distances[neighbor] = new_dist
+                    heapq.heappush(pq, (new_dist, neighbor))
+
+    for i in range(n):
+        if distances[i] == float('inf'):
+            distances[i] = 0
+        distances[i] = int(distances[i])
+    return distances
+
+
+def calculate_depth(adj_matrix):
+    n = len(adj_matrix)
+    depth = [0] * n
+    visited = [False] * n
+    # use_visited = False
+
+    # if has_cycle(adj_matrix):
+    #     use_visited = True
+    use_visited = True
+    def bfs(start, str, use_visited):
+        queue = [start]
+        if str == "root":
+            depth[start] = 1
+        else:
+            have_child = False
+            for neighbor in range(n):
+                if adj_matrix[start][neighbor] == 1:
+                    have_child = True
+                    break
+            
+            if have_child:
+                depth[start] = 1
+            else:
+                depth[start] = 0
+                return
+                
+        visited[start] = True
+        while queue:
+            current = queue.pop(0)
+            for neighbor in range(n):
+                if use_visited:
+                    if adj_matrix[current][neighbor] == 1 and not visited[neighbor]:
+                        queue.append(neighbor)
+                        depth[neighbor] = max(depth[current] + 1, depth[neighbor])
+                        visited[neighbor] = True
+                else:
+                    if adj_matrix[current][neighbor] == 1:
+                        queue.append(neighbor)
+                        depth[neighbor] = max(depth[current] + 1, depth[neighbor])
+    
+    bfs(0, "root", use_visited)
+    
+    # for i in range(n):
+    #     if not visited[i]:
+    #         bfs(i, "not_root", use_visited)
+    
+    return depth
+
+
+def has_cycle(adj_matrix):
+    n = len(adj_matrix)
+    in_degree = [0] * n
+    topological_order = []
+    
+    # 计算每个节点的入度
+    for i in range(n):
+        for j in range(n):
+            if adj_matrix[j][i] == 1:
+                in_degree[i] += 1
+    
+    # 将所有入度为0的节点加入队列
+    queue = [i for i in range(n) if in_degree[i] == 0]
+    
+    # 进行拓扑排序
+    while queue:
+        current = queue.pop(0)
+        topological_order.append(current)
+        for neighbor in range(n):
+            if adj_matrix[current][neighbor] == 1:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+    
+    # 检查结果
+    return len(topological_order) != n
+
 
 class MLPforBiaffine(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -207,7 +315,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
-        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, use_graph=False):
+        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)  # L, M-m, B
         # print(qlen, rlen)
         # r: M-m * None * d_model
@@ -269,35 +377,26 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # else:
         BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, r_head_k))              # qlen x rlen x bsz x n_head
         # logger.info("BD: %s", str(BD.shape))
-        if attn_relpos is None or use_graph:
-            if use_graph:
-                attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
-                # attn_relpos = torch.zeros_like(attn_relpos)
-                attn_relpos = (max_len - attn_relpos).long()
-                attn_relpos = attn_relpos.permute(1, 2, 0)
-                r_squeezed = r.squeeze(1)
-                d = r_squeezed[attn_relpos]
-                w2 = w.unsqueeze(1)
-                w2 = w2.repeat(1, qlen, 1, 1)
-                w_graphlayer = self.qkv_net(w2 + d)
-
-                _, w_k_graphlayer, _ = torch.chunk(w_graphlayer, 3, dim=-1)
-                w_k_graphlayer = w_k_graphlayer.view(klen, rlen, bsz, self.n_head, self.d_head)
-                # r_head_k = r_head_k.unsqueeze(1).repeat(1,bsz,1,1)
-                # r_head_k = r_head_k + w_k_graphlayer
-                Moderate_BD = torch.einsum('ibnd,ijbnd->ijbn',(w_head_q, w_k_graphlayer))
-                BD = Moderate_BD + BD
+        if attn_relpos is None:
             BD = self._rel_shift(BD)
         else:
-            # BD = self._rel_shift(BD)
+            # RkD
             attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
             # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
             # attn_relpos = 10 * torch.ones_like(attn_relpos)
             attn_relpos = (max_len - attn_relpos).long()
             attn_relpos = attn_relpos.permute(1, 2, 0)
             BD = self._rel_shift(BD) + BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-            # BD = torch.einsum('ijbn,bisj->isbn', BD, relpos_one_hot)  
-                          # qlen x klen x bsz x n_head
+
+            # WkD
+            # BD = self._rel_shift(BD)
+            # r_graph = self.qkv_net(r)
+            # _,r_w_graph,_ = torch.chunk(r_graph, 3, dim=-1)
+
+            # r_w_graph = r_w_graph.view(rlen, self.n_head, self.d_head)
+            # Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (w_head_q, r_w_graph))
+            # BD = BD + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
         attn_score = AC + BD
@@ -349,18 +448,18 @@ class TransformerGrammarLayer(nn.Module):
                             d_head, dropouta, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
-    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False, use_graph=False):
+    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, cache=cache, use_graph=use_graph)
+                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, cache=cache)
             output = self.pos_ff(output)
 
             return output, new_key, new_value
         else:
             output = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, use_graph=use_graph)
+                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values)
             output = self.pos_ff(output)
             
             return output
@@ -423,7 +522,7 @@ class TransformerGrammar(nn.Module):
         self.right_arc2 = right_arc2
 
     def forward(self, x, startofword_x, length, use_mask=None, document_level=False, return_h=False,
-        max_relative_length=None, min_relative_length=None, iseval=False, sents_index_to_id=None, sents_arrow=None):
+        max_relative_length=None, min_relative_length=None, iseval=False, sents_index_to_id=None, sents_arrow=None, rel_type='degree'):
         
         attn_mask = []
         attn_relpos = []
@@ -475,34 +574,73 @@ class TransformerGrammar(nn.Module):
             left_sents_arrow, right_sents_arrow = sents_arrow
 
             attn_relpos = []
-            for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
-                Degree_out = [0]*(length_i + 1)
-                Degree_in = [0]*(length_i + 1)
-                graph = np.zeros((length_i + 1, length_i + 1))
-                sent_attn_relpos = []
-                for i in range(len(left_sent_arrow)):
-                    if left_sent_arrow[i]:  #i <- j
-                        for j in left_sent_arrow[i]:
-                            graph[j][i + 1] = 1
-                            Degree_out[j - 1] += 1
-                            Degree_in[i] += 1
-                    if right_sent_arrow[i]: #i -> j
-                        for j in right_sent_arrow[i]:
-                            graph[i + 1][j] = 1
-                            Degree_in[j - 1] += 1
-                            Degree_out[i] += 1
-                    rel_pos_1 = Degree_out[:-1]
-                    rel_pos_2 = Degree_in[:-1]
-                    # Wk R
-                    rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]
-                    rel_pos_2 = rel_pos_2[(i+1):] + rel_pos_2[:(i+1)]
-                    sent_attn_relpos.append(copy.deepcopy(10 * np.array(rel_pos_1) + 1 * np.array(rel_pos_2)))
-                max_graphlayer_rel = max(Degree_out[:-1])
-                for j in range(length_i - len(sent_attn_relpos)):
-                    sent_attn_relpos.append([0]*(length_i))
-                attn_relpos.append(sent_attn_relpos)
-                # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
-            
+            if rel_type == "degree":
+                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
+                    Degree_out = [0]*(length_i + 1)
+                    Degree_in = [0]*(length_i + 1)
+                    graph = np.zeros((length_i + 1, length_i + 1))
+                    sent_attn_relpos = []
+                    for i in range(len(left_sent_arrow)):
+                        if left_sent_arrow[i]:  #i <- j
+                            for j in left_sent_arrow[i]:
+                                graph[j][i + 1] = 1
+                                Degree_out[j - 1] += 1
+                                Degree_in[i] += 1
+                        if right_sent_arrow[i]: #i -> j
+                            for j in right_sent_arrow[i]:
+                                graph[i + 1][j] = 1
+                                Degree_in[j - 1] += 1
+                                Degree_out[i] += 1
+                        rel_pos_1 = Degree_out[:-1]
+                        rel_pos_2 = Degree_in[:-1]
+                        # Wk R
+                        # rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]
+                        # rel_pos_2 = rel_pos_2[(i+1):] + rel_pos_2[:(i+1)]
+                        sent_attn_relpos.append(copy.deepcopy(10 * np.array(rel_pos_1) + 1 * np.array(rel_pos_2)))
+                    max_graphlayer_rel = max(Degree_out[:-1])
+                    for j in range(length_i - len(sent_attn_relpos)):
+                        sent_attn_relpos.append([0]*(length_i))
+                    attn_relpos.append(sent_attn_relpos)
+                    # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
+            elif rel_type == "depth":
+                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
+                    graph = np.zeros((length_i + 1, length_i + 1))
+                    sent_attn_relpos = []
+                    for i in range(len(left_sent_arrow)):
+                        if left_sent_arrow[i]:  #i <- j
+                            for j in left_sent_arrow[i]:
+                                graph[j][i + 1] = 1
+                                graph[i + 1][j] = 1
+                        if right_sent_arrow[i]: #i -> j
+                            for j in right_sent_arrow[i]:
+                                graph[i + 1][j] = 1
+                                graph[j][i + 1] = 1
+                        
+                        depth = calculate_depth(graph)
+                        sent_attn_relpos.append(copy.deepcopy(np.array(depth[1:])))
+                    for j in range(length_i - len(sent_attn_relpos)):
+                        sent_attn_relpos.append([0]*(length_i))
+                    attn_relpos.append(sent_attn_relpos)
+            elif rel_type == "distance":
+                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
+                    graph = np.zeros((length_i + 1, length_i + 1))
+                    sent_attn_relpos = []
+                    for i in range(len(left_sent_arrow)):
+                        if left_sent_arrow[i]:  #i <- j
+                            for j in left_sent_arrow[i]:
+                                graph[j][i + 1] = 1
+                                graph[i + 1][j] = 1
+                        if right_sent_arrow[i]: #i -> j
+                            for j in right_sent_arrow[i]:
+                                graph[i + 1][j] = 1
+                                graph[j][i + 1] = 1
+                        
+                        distance = dijkstra(graph, i + 1)
+                        sent_attn_relpos.append(copy.deepcopy(np.array(distance[1:])))
+                    for j in range(length_i - len(sent_attn_relpos)):
+                        sent_attn_relpos.append([0]*(length_i))
+                    attn_relpos.append(sent_attn_relpos)
+                
             attn_relpos = torch.LongTensor(np.array(attn_relpos))
             if torch.cuda.is_available():
                 attn_relpos = attn_relpos.cuda()
@@ -730,7 +868,7 @@ class TransformerGrammar(nn.Module):
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
             core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
-                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length, use_graph=True)
+                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)

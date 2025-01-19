@@ -69,8 +69,9 @@ parser.add_argument('--dropouto', default=0.5, type=float)
 parser.add_argument('--alpha', default=0.2, type=float)
 parser.add_argument('--beta', default=0.1, type=float)
 parser.add_argument('--transformer_lr_ratio', default=1.0, type=float)
-parser.add_argument('--TBloss_ratio', default=1.0, type=float)
+parser.add_argument('--BTloss_ratio', default=1.0, type=float)
 parser.add_argument('--dataset', default="default", type=str)
+parser.add_argument('--rel_type', default="degree", type=str)
 
 
 def log_arguments(args):
@@ -305,7 +306,8 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             mems = tuple()
             
             ret, hidden = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
-                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=[sents_left_arrow, sents_right_arrow])
+                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
+                        sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
             hidden = hidden.transpose(0, 1)
             batch_words_input = hidden_alignment(hidden, sents_index_to_id)
             if [left_arrow, right_arrow]:
@@ -329,15 +331,15 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
 
                             if left_gt:
                                 label_num += len(left_gt)
-                            else:
-                                label_num += 1  # to itself
-                                left_gt = [words_index]
+                            # else:
+                            #     label_num += 1  # to itself
+                            #     left_gt = [words_index]
 
                             if right_gt:
                                 label_num += len(right_gt)
-                            else:
-                                label_num += 1
-                                right_gt = [words_index]
+                            # else:
+                            #     label_num += 1
+                            #     right_gt = [words_index]
                             
                             infer_num += len(left_pred[0]) + len(right_pred[0])
 
@@ -604,7 +606,8 @@ def main(args):
             #     ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
             #             args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
             ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
-                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=[sents_left_arrow, sents_right_arrow])
+                        args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
+                        sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
 
             hidden = hidden.transpose(0, 1)
             batch_words_input = hidden_alignment(hidden, sents_index_to_id)
@@ -627,6 +630,7 @@ def main(args):
                         if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
                             predicate_input, words_index = get_span(sent_hidden, sent_index_to_id, j)
                             max_word_length = max(sent_index_to_id)
+                            words_index -= 1
                             padding_length = max_word_length - len(words_input[:words_index])
                             if torch.cuda.is_available():
                                 # words_piece_input = torch.stack([torch.zeros(args.w_dim).cuda()] + words_input[:words_index] + [torch.zeros(args.w_dim).cuda()]*(padding_length - 1))
@@ -648,24 +652,27 @@ def main(args):
                                 # right_mask = torch.zeros(max_word_length)
                             # left_mask[len(words_input[:words_index]) + 1:max_word_length] = -1
                             # right_mask[len(words_input[:words_index]) + 1:max_word_length] = -1
-                            if sent_left_label[words_index - 1]:
+                            if sent_left_label[words_index]:
                                 # for left_label_id in sent_left_label[words_index - 1]:
                                 #     if left_label_id != 0:
                                 #         left_label[left_label_id - 1] = 1    #predict 1 means id:1 word
                                 #     else:
                                 #         left_label[words_index - 1] = 1
-                                left_label[sent_left_label[words_index - 1]] = 1
-                            else:
-                                left_label[words_index] = 1
-                            if sent_right_label[words_index - 1]:
+                                left_label[sent_left_label[words_index]] = 1
+                            # shift when predict itself
+                            # else:
+                            #     left_label[words_index] = 1
+                                
+                            if sent_right_label[words_index]:
                                 # for right_label_id in sent_right_label[words_index - 1]:
                                 #     if right_label_id != 0:
                                 #         right_label[right_label_id - 1] = 1
                                 #     else:
                                 #         right_label[words_index - 1] = 1
-                                right_label[sent_right_label[words_index - 1]] = 1
-                            else:
-                                right_label[words_index] = 1
+                                right_label[sent_right_label[words_index]] = 1
+                            # shift when predict itself
+                            # else:
+                            #     right_label[words_index] = 1
                                 # label = torch.zeros((max_length))
                             # label[sent_label[j] - 1] = 1
                             left_labels.append(left_label)
@@ -677,7 +684,7 @@ def main(args):
                         input2 = torch.stack(input2)
                         left_labels = torch.stack(left_labels)
                         # left_masks = torch.stack(left_masks)
-                        mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[1:,:]
+                        mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:]
                         if torch.cuda.is_available():
                             mask = mask.cuda()
                         # left_mask_loss = (left_masks != -1).float()
@@ -699,7 +706,7 @@ def main(args):
             # print(f"Biaffine forwarding takes {time.time()-biaffine_start:.2f} seconds")
             raw_loss = ret
             raw_biaffine_loss = torch.stack(biaffine_loss).mean()
-            loss = 1/(1+args.TBloss_ratio) * raw_loss.mean() + args.TBloss_ratio/(1+args.TBloss_ratio) * raw_biaffine_loss
+            loss = 1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss
             train_loss += raw_loss.sum().item()
             
             train_biaffine_loss += raw_biaffine_loss.item()
