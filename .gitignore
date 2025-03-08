@@ -12,3 +12,4 @@
 /data_process/transition_sequence_txl
 /Dep_Transformer_Grammars/.dependencies
 /Dep_Transformer_Grammars/data_scripts
+.gitignore
