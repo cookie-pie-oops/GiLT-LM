@@ -10,30 +10,35 @@ def train_spm_model():
     # --user_defined_symbols=->,<-,->2,<-2""")
     
     #DTG
-    spm.SentencePieceTrainer.Train(input='BLLIP_LG_TRAIN.txt', model_prefix='./spm/BLLIP_spm',vocab_size=32719, \
+    spm.SentencePieceTrainer.Train(input='bllip_train_LG.cc', model_prefix='./spm/BLLIP_spm',vocab_size=32772, \
                                character_coverage=1.0, pad_id=0, bos_id=1, eos_id=2, unk_id=3, \
-                               user_defined_symbols='->,<-,->2,<-2', \
+                               user_defined_symbols='->,<-,->2,<-2,(ADJP,(ADVP,(CONJP,(FRAG,(INTJ,(LST,(NAC,(NP,(NX,(PP,(PRN,(PRT,(QP,(RRC,(S,(SBAR,(SBARQ,(SINV,(SQ,(UCP,(VP,(WHADJP,(WHADVP,(WHNP,(WHPP,(X,ADJP),ADVP),CONJP),FRAG),INTJ),LST),NAC),NP),NX),PP),PRN),PRT),QP),RRC),S),SBAR),SBARQ),SINV),SQ),UCP),VP),WHADJP),WHADVP),WHNP),WHPP),X)', \
                                max_sentence_length=100000, shuffle_input_sentence=True
                                )
 
 def spm_encode():
     sp = spm.SentencePieceProcessor()
-    sp.load('./spm_size/BLLIP_spm.model')
+    sp.load('./spm_parsing/BLLIP_spm.model')
+    # encode with TG_spm and (65, 32762) == ->, (3, 65) == <-, (3, 2371) == <-2, (65, 32762, 553) == ->2
+    # -> 32768 <- 32769 ->2 32770 <-2 32771
 
-    Type = ["TRAIN", "DEV", "TEST"]
-    Dataset_type = "token_level_vocab"
-    # SDP = ["dm", "pas", "psd"]
-    SDP = ["TOK"]
+    # Type = ["TEST","DEV","TRAIN"]
+    Type = ["TEST"]
+    Dataset_type = "sdp_trans_silver_parse_graph"
+    # SDP = ["dm", 'pas', 'psd']
+    SDP = ["psd"]
+    num = 1800
+    # SDP = ["TOK"]
     for t in Type:
         for sdp in SDP:
-            print(f"Wirte file : ./{Dataset_type}/BLLIP_LG_{t}_SPM_ARC_{sdp}.txt")
-            fw = open(f'./{Dataset_type}/BLLIP_LG_{t}_SPM_ARC_{sdp}.csv', 'w')
-            # with open(f'./{Dataset_type}/BLLIP_LG_{t}_{sdp}.txt', 'r') as f:
-            with open(f'./BLLIP_LG_{t}.txt', 'r') as f:
+            print(f"Wirte file : ./{Dataset_type}/BLLIP_LG_{t}_SPM_{sdp}_{num}.txt")
+            fw = open(f'./{Dataset_type}/BLLIP_LG_{t}_SPM_{sdp}_{num}.txt', 'w')
+            with open(f'./{Dataset_type}/BLLIP_LG_{t}_{sdp}_{num}.txt', 'r') as f:
+            # with open(f'./BLLIP_LG_{t}.txt', 'r') as f:
                 lines = f.readlines()
                 for line in lines:
                     encoder_list = sp.encode_as_ids(line)
-                    fw.write(','.join(map(str, encoder_list))+'\n')
+                    fw.write(' '.join(map(str, encoder_list))+'\n')
             f.close()
             fw.close()
             print("Done.")

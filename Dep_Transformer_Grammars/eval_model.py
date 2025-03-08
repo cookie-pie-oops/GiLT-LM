@@ -3,9 +3,10 @@ import torch
 import argparse
 import os
 import sys
+import copy
 import torch.nn as nn
 import logging
-import time
+import time, math
 import json
 from torch import cuda
 from helping_utils.logger import configure_logger, get_logger
@@ -67,6 +68,8 @@ parser.add_argument('--dropouto', default=0.5, type=float)
 parser.add_argument('--alpha', default=0.2, type=float)
 parser.add_argument('--beta', default=0.1, type=float)
 parser.add_argument('--rel_type', default="degree", type=str)
+parser.add_argument('--eval_type', default="normal", type=str)
+parser.add_argument('--sampling_num', default=0, type=int)
 
 def log_arguments(args):
 
@@ -75,13 +78,17 @@ def log_arguments(args):
     for key, value in hp_dict.items():
         logger.info(f"{key}\t{value}")
 
-def load_data(path, batchsize=-1, shuffle=False):
+def load_data(path, batchsize=-1, shuffle=False, args=None):
     
     with open(path, 'r') as f:
         sents = [line.strip() for line in f.readlines()]
         sents = [sent.split(',') for sent in sents]
         sents = [[int(word) for word in sent] for sent in sents]
     
+    if args.eval_type == "estimate":
+        # repeat each sents for sampling_num times
+        sents = [copy.copy(item) for item in sents for _ in range(args.sampling_num)]
+
     if shuffle:
         np.random.shuffle(sents)
     
@@ -252,13 +259,21 @@ def weights_init(m):
             fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
             nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
 
-def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_biaffine_model, right_biaffine_model, length, args = None):
+def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_biaffine_model, right_biaffine_model, length, epsilon = 0, args = None):
     model.eval()
     num_sents = 0
     total_loss = 0.0
-    total_biaffine_loss = 0.0
+    total_loss_with_biaffine = 0.0
     num_words = 0
     uas = 0
+    eval_epoch = int(args.sampling_num/args.eval_batch_size)
+    count_num = 0
+    setence_possible = 0.0
+    sum_loss_list = [0.0]*eval_epoch
+    sentence_length = 0
+    loss_list = []
+    bce_loss = torch.nn.BCELoss(reduction="sum")
+    logger = get_logger()
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -269,7 +284,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
             batch_size = len(sents)
             total_length = sum([len(sent) - 1 for sent in sents])
             mems = tuple()
-            
+
             # iseval for output some predictions
             # import pdb;pdb.set_trace()
             # sents[0][-30:]=[0]*30
@@ -278,20 +293,21 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
             ret, hidden = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, 
                         sents_arrow=[sents_left_arrow, sents_right_arrow], iseval=True, rel_type=args.rel_type)
-            
+
+            if args.eval_type != "estimate":               
+                total_loss += ret.sum().item()
+                num_words += total_length
             hidden = hidden.transpose(0, 1)
             batch_words_input = hidden_alignment(hidden, sents_index_to_id)
             biaffine_loss = 0
             if [left_arrow, right_arrow]:
-                for sent_ids, sent_hidden, sent_index_to_id, words_input, sent_left_label, sent_right_label in zip(
-                    sents, hidden, sents_index_to_id, batch_words_input, sents_left_arrow, sents_right_arrow):
+                for i, (sent_ids, sent_hidden, sent_index_to_id, words_input, sent_left_label, sent_right_label) in enumerate(zip(
+                    sents, hidden, sents_index_to_id, batch_words_input, sents_left_arrow, sents_right_arrow)):
+                    sent_biaffine_loss = 0
                     for j in range(len(sent_ids)):
                         if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
                             predicate_input, words_index = get_span(sent_hidden, sent_index_to_id, j)
-                            # if torch.cuda.is_available():
-                            #     words_piece_input = torch.stack([torch.zeros(args.w_dim).cuda()] + words_input[:words_index])
-                            # else:
-                            #     words_piece_input = torch.stack([torch.zeros(args.w_dim)] + words_input[:words_index])
+
                             if words_index != 1:
                                 words_piece_input = torch.stack(words_input[:words_index - 1])
                             elif torch.cuda.is_available():
@@ -304,39 +320,82 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
                             left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
                             right_gt = sent_right_label[words_index - 1]
 
-                            epsilon = 1e-323
+                            # left_gt_tensor = torch.zeros(words_index).double().to(words_piece_input.device)
                             if not left_gt:
-                                # left_gt = [words_index]
-                                left_gt = list(range(words_index - 1))
-                                biaffine_loss -= torch.sum(torch.log(1-left_logits[left_gt] + epsilon))
+                                # sent_biaffine_loss += bce_loss(left_logits, left_gt_tensor)
+                                left_gt = list(range(words_index))
+                                sent_biaffine_loss -= torch.sum(torch.log(1-left_logits[left_gt] + epsilon))
                             else:
-                                biaffine_loss -= torch.sum(torch.log(left_logits[left_gt] + epsilon))
-                                other_position = [i for i in range(words_index - 1) if i not in left_gt]
-                                biaffine_loss -= torch.sum(torch.log(1-left_logits[other_position] + epsilon))
-
+                                # left_gt_tensor[left_gt] = 1
+                                # sent_biaffine_loss += bce_loss(left_logits, left_gt_tensor)
+                                sent_biaffine_loss -= torch.sum(torch.log(left_logits[left_gt] + epsilon))
+                                other_position = [i for i in range(words_index) if i not in left_gt]
+                                sent_biaffine_loss -= torch.sum(torch.log(1-left_logits[other_position] + epsilon))
+                            
+                            # right_gt_tensor = torch.zeros(words_index).double().to(words_piece_input.device)
                             if not right_gt:
-                                # right_gt = [words_index]
-                                right_gt = list(range(words_index - 1))
-                                biaffine_loss -= torch.sum(torch.log(1-right_logits[right_gt] + epsilon))
+                                # sent_biaffine_loss += bce_loss(right_logits, right_gt_tensor)
+                                right_gt = list(range(words_index))
+                                sent_biaffine_loss -= torch.sum(torch.log(1-right_logits[right_gt] + epsilon))
                             else:
-                                biaffine_loss -= torch.sum(torch.log(right_logits[right_gt] + epsilon))
-                                other_position = [i for i in range(words_index - 1) if i not in right_gt]
-                                biaffine_loss -= torch.sum(torch.log(1-right_logits[other_position] + epsilon))
+                                # right_gt_tensor[right_gt] = 1
+                                # sent_biaffine_loss += bce_loss(right_logits, right_gt_tensor)
+                                sent_biaffine_loss -= torch.sum(torch.log(right_logits[right_gt] + epsilon))
+                                other_position = [i for i in range(words_index) if i not in right_gt]
+                                sent_biaffine_loss -= torch.sum(torch.log(1-right_logits[other_position] + epsilon))
 
                             # if torch.isinf(biaffine_loss):
                             #     import pdb;pdb.set_trace()
                             #     raise ValueError("Biaffine loss is Inf.")
                             # biaffine_loss -= torch.sum(torch.log(left_logits[left_gt])) + torch.sum(torch.log(right_logits[right_gt]))
-            num_words += total_length
+                    ret[i] += sent_biaffine_loss
             num_sents += batch_size
-            total_loss += ret.sum().item()
-            total_biaffine_loss += biaffine_loss.item()
 
+            if args.eval_type == "estimate":
+                if count_num <= eval_epoch - 1:
+                    setence_possible += np.sum(np.exp(-ret.to('cpu').numpy().astype(np.float64)))
+                    loss_list.append(-math.log(setence_possible + 1e-323))
+                    count_num += 1
+                else:
+                    total_loss_with_biaffine += -math.log(setence_possible + 1e-323)
+                    assert len(loss_list) == eval_epoch
+                    sum_loss_list = [x + y for x, y in zip(sum_loss_list, loss_list)]
+                    count_num = 1
+                    trans_ppl = np.exp(-math.log(setence_possible + 1e-323)/sentence_length)
+                    logger.info(f"trans ppl {trans_ppl:.4f}, {sentence_length}")
+                    setence_possible = np.sum(np.exp(-ret.to('cpu').numpy().astype(np.float64)))
+                    loss_list = []
+                    loss_list.append(-math.log(setence_possible + 1e-323))
+                    
+                if count_num == 1:
+                    sentence_length = len(sents[0]) - 1
+                    ori_ppl = np.exp(ret[0].item()/ sentence_length)
+                    total_loss += ret[0].item()
+                    num_words += sentence_length
+                    logger.info(f"ori ppl {ori_ppl:.4f}")
+            else:
+                total_loss_with_biaffine += ret.sum().item()          
+    
     ppl = np.exp(total_loss / num_words) 
-    ppl_biaffine = np.exp((total_loss + total_biaffine_loss) / num_words)
-    logger = get_logger()
-    logger.info(f"eval ppl {ppl:.4f}")
-    logger.info(f"eval ppl with biaffine loss {ppl_biaffine:.4f}")
+    ppl_biaffine = np.exp(total_loss_with_biaffine / num_words)     
+    if args.eval_type == "estimate":
+        total_loss_with_biaffine += -math.log(setence_possible + 1e-323)
+        ppl_biaffine = np.exp(total_loss_with_biaffine / num_words)
+        trans_ppl = np.exp(-math.log(setence_possible + 1e-323)/sentence_length)
+        sum_loss_list = [x + y for x, y in zip(sum_loss_list, loss_list)]
+        logger.info(f"trans ppl {trans_ppl:.4f}, {sentence_length}")
+
+        logger.info(f"sum_loss_list: {sum_loss_list}")
+        logger.info(f"num of words: {num_words}")
+        for i in range(len(sum_loss_list)):
+            logger.info(f"Estimated sampling graph {(i+1)*args.eval_batch_size}: {np.exp(sum_loss_list[i] / num_words):.4f}")
+
+        logger.info(f"eval ppl with biaffine loss {ppl:.4f}")
+        logger.info(f"eval ppl with biaffine loss w/ sampling {ppl_biaffine:.4f}")
+    else:
+        logger.info(f"eval token ppl {ppl:.4f}")
+        logger.info(f"eval ppl with biaffine loss w/o sampling {ppl_biaffine:.4f}")
+
     model.train()
     return ppl, uas
 
@@ -351,22 +410,22 @@ def main(args):
     batch_size = args.batch_size
     eval_batch_size = args.eval_batch_size
 
-    # dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=False)
-    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=False)
+    dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=False, args=args)
+    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=False, args=args)
     left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=args.seed)
     left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=args.seed)
     vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id, vocab = load_vocab(args.vocab_file)
-    
+
     # print(left_arc)
     # print(right_arc)
     # print(len(startofword_id))
 
-    # dev_data, startofword_dev, dev_length, dev_index_to_id = add_to_all(dev_data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id)
+    dev_data, startofword_dev, dev_length, dev_index_to_id = add_to_all(dev_data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id)
     test_data, startofword_test, test_length, test_index_to_id = add_to_all(test_data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id)
 
-    # assert len(dev_data) == len(startofword_dev)
+    assert len(dev_data) == len(startofword_dev)
     assert len(test_data) == len(startofword_test)
-    # assert len(dev_data) == len(dev_length)
+    assert len(dev_data) == len(dev_length)
     assert len(test_data) == len(test_length)
     # opening_id and closing_id are tuple-like ranges
     
@@ -375,7 +434,7 @@ def main(args):
     log_arguments(args)
     logger = get_logger()
     
-    # logger.info(f"dev data batches: {len(dev_data)}")
+    logger.info(f"dev data batches: {len(dev_data)}")
     logger.info(f"test data batches: {len(test_data)}")
 
     start_time = time.time()
@@ -409,11 +468,23 @@ def main(args):
     model.eval()
     left_biaffine_model.eval()
     right_biaffine_model.eval()
-            
-    # val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model, left_biaffine_model, right_biaffine_model, dev_length, args=args)
 
-    test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, left_biaffine_model, right_biaffine_model, test_length, args=args)
-    
+    logger.info(f"------")
+    logger.info(f"DEV SET\n")
+    # logger.info(f"epsilon = 0:")       
+    # val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model, left_biaffine_model, right_biaffine_model, dev_length, epsilon = 0, args=args)
+
+    logger.info(f"epsilon = 1e-323:")       
+    val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model, left_biaffine_model, right_biaffine_model, dev_length, epsilon = 1e-323, args=args)
+
+    logger.info(f"------")
+    logger.info(f"TEST SET\n")
+    # logger.info(f"epsilon = 0:")
+    # test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, left_biaffine_model, right_biaffine_model, test_length, epsilon = 0, args=args)
+
+    logger.info(f"epsilon = 1e-323:")
+    test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, left_biaffine_model, right_biaffine_model, test_length, epsilon = 1e-323, args=args)
+ 
     logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
     
     end_time = time.time()

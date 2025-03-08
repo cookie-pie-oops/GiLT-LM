@@ -76,6 +76,8 @@ def load_data(path, batchsize=-1, shuffle=False):
     
     with open(path, 'r') as f:
         sents = [line.strip() for line in f.readlines()]
+        # if "TRAIN" in path:
+        #     sents = sents[:len(sents)//4]
         sents = [sent.split(',') for sent in sents]
         sents = [[int(word) for word in sent] for sent in sents]
     

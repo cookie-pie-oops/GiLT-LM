@@ -1,11 +1,15 @@
 #!/bin/bash
+#SBATCH -t 5-00:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH -G 1
+
 python train_dep.py \
-    --train_file  ../data_process/token_level_vocab/BLLIP_LG_TRAIN_SPM_ARC_TOK.csv \
-    --dev_file ../data_process/token_level_vocab/BLLIP_LG_DEV_SPM_ARC_TOK.csv \
-    --test_file ../data_process/token_level_vocab/BLLIP_LG_TEST_SPM_ARC_TOK.csv \
-    --log_file logs/log_standard_tok_txl_seed_4_spm.txt \
-    --vocab_file ../data_process/spm_size/BLLIP_spm.vocab \
-    --save_path models/standard_tok_txl_seed_4_spm.pt \
+    --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
+    --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
+    --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
+    --log_file logs/log_large_tok_txl_seed_4.txt \
+    --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
+    --save_path models/large_tok_txl_seed_4.pt \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
     --attn_mask None \
