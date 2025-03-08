@@ -81,7 +81,6 @@ def calculate_depth(adj_matrix):
                         depth[neighbor] = max(depth[current] + 1, depth[neighbor])
     
     bfs(0, "root", use_visited)
-    
     # for i in range(n):
     #     if not visited[i]:
     #         bfs(i, "not_root", use_visited)
@@ -313,6 +312,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
+        self.depth_embed = torch.nn.Embedding(151, self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
         , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
@@ -383,10 +383,13 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             # RkD
             attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
             # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
-            # attn_relpos = 10 * torch.ones_like(attn_relpos)
-            attn_relpos = (max_len - attn_relpos).long()
+            # attn_relpos = torch.zeros_like(attn_relpos)
             attn_relpos = attn_relpos.permute(1, 2, 0)
-            BD = self._rel_shift(BD) + BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+            depth_biases = self.depth_embed(attn_relpos)
+            Moderate_BD = torch.einsum('ibnd,ijbd->ijbn', (w_head_q, depth_biases))
+            # attn_relpos = (max_len - attn_relpos).long()
+            BD = self._rel_shift(BD) + Moderate_BD
+            # BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
 
             # WkD
             # BD = self._rel_shift(BD)
@@ -629,11 +632,11 @@ class TransformerGrammar(nn.Module):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
                                 graph[j][i + 1] = 1
-                                graph[i + 1][j] = 1
+                                graph[i + 1][j] = 2  #2
                         if right_sent_arrow[i]: #i -> j
                             for j in right_sent_arrow[i]:
                                 graph[i + 1][j] = 1
-                                graph[j][i + 1] = 1
+                                graph[j][i + 1] = 2  #2
                         
                         distance = dijkstra(graph, i + 1)
                         sent_attn_relpos.append(copy.deepcopy(np.array(distance[1:])))
@@ -851,7 +854,10 @@ class TransformerGrammar(nn.Module):
         
         if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None" or use_mask == 'sdp_arc' or use_mask == 'graphlayer':
             pos_emb = self.pos_emb(torch.arange(seq_len-1, -1, -1.0, device=word_emb.device))
-            max_relative_length = seq_len - 1
+            if use_mask == 'graphlayer':
+                max_relative_length = 150
+            else:
+                max_relative_length = seq_len - 1
             min_relative_length = 0
         else:
             if max_relative_length is None:

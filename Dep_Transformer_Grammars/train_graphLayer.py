@@ -86,7 +86,7 @@ def load_data(path, batchsize=-1, shuffle=False, seed=1111, size="default"):
     with open(path, 'r') as f:
         if size == "demo":
             sents = [line.strip() for line in f.readlines()][:1000]
-        elif size == "mini":
+        elif size == "small":
             sents = [line.strip() for line in f.readlines()]
             sents = sents[:len(sents)//4]
         else:
@@ -109,7 +109,7 @@ def load_multiarrow(path, batchsize=-1, shuffle=False, seed=1111, size="default"
     with open(path, 'r') as f:
         if size == "demo":
             arrow_lists = [line.strip() for line in f.readlines()][:1000]
-        elif size == "mini":
+        elif size == "small":
             arrow_lists = [line.strip() for line in f.readlines()]
             arrow_lists = arrow_lists[:len(arrow_lists)//4]
         else:
@@ -550,7 +550,7 @@ def main(args):
     train_step = 0
     remaining_epoch = 0
     
-    checkpoint_step = 0
+    checkpoint_step = 1000
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0
@@ -558,35 +558,35 @@ def main(args):
         train_loss = 0.0
         train_biaffine_loss = 0.0
         for i in range(len(train_data)):
-            if train_step <= checkpoint_step:
+            if train_step < checkpoint_step:
                 # checkpoint_step -= 1
                 train_step += 1
 
-                optimizer.zero_grad()
-                left_biaffine_optimizer.zero_grad()
-                right_biaffine_optimizer.zero_grad()
-                optimizer.step()
-                left_biaffine_optimizer.step()
-                right_biaffine_optimizer.step()
-                if args.scheduler == 'const':
-                    pass
-                elif train_step < warm_up_step:
-                    warm_up_scheduler.step()
-                    left_biaffine_warm_up_scheduler.step()
-                    right_biaffine_warm_up_scheduler.step()
-                elif args.scheduler == 'cosine':
-                    if train_step < decay_steps:
-                        scheduler.step()
-                        left_biaffine_scheduler.step()
-                        right_biaffine_scheduler.step()
-                    else:
-                        for i in range(len(optimizer.param_groups)):
-                            optimizer.param_groups[i]['lr'] = args.stable_lr
-                        for i in range(len(left_biaffine_optimizer.param_groups)):
-                            left_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
-                            right_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
+                # optimizer.zero_grad()
+                # left_biaffine_optimizer.zero_grad()
+                # right_biaffine_optimizer.zero_grad()
+                # optimizer.step()
+                # left_biaffine_optimizer.step()
+                # right_biaffine_optimizer.step()
+                # if args.scheduler == 'const':
+                #     pass
+                # elif train_step < warm_up_step:
+                #     warm_up_scheduler.step()
+                #     left_biaffine_warm_up_scheduler.step()
+                #     right_biaffine_warm_up_scheduler.step()
+                # elif args.scheduler == 'cosine':
+                #     if train_step < decay_steps:
+                #         scheduler.step()
+                #         left_biaffine_scheduler.step()
+                #         right_biaffine_scheduler.step()
+                #     else:
+                #         for i in range(len(optimizer.param_groups)):
+                #             optimizer.param_groups[i]['lr'] = args.stable_lr
+                #         for i in range(len(left_biaffine_optimizer.param_groups)):
+                #             left_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
+                #             right_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
                 continue
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             tmp_time = time.time()
             sents = train_data[i]
             sents_index_to_id = train_index_to_id[i]
@@ -693,7 +693,7 @@ def main(args):
                         # right_mask_loss = (right_masks != -1).float()
                         left_logits = left_biaffine_model(input1, input2)
                         right_logits = right_biaffine_model(input1, input2)
-                        loss = (crit(left_logits.squeeze(),left_labels.squeeze().double()) * mask).mean() + (crit(right_logits.squeeze(),right_labels.squeeze().double()) * mask).mean()
+                        loss = (crit(left_logits.squeeze(),left_labels.squeeze().double()) * mask).sum() + (crit(right_logits.squeeze(),right_labels.squeeze().double()) * mask).sum()
                         biaffine_loss.append(loss / 2)
             
             # if args.return_h:
@@ -705,11 +705,11 @@ def main(args):
             # else:
             # print(f"Biaffine forwarding takes {time.time()-biaffine_start:.2f} seconds")
             raw_loss = ret
-            raw_biaffine_loss = torch.stack(biaffine_loss).mean()
-            loss = 1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss
+            raw_biaffine_loss = torch.stack(biaffine_loss)
+            loss = 1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean()
             train_loss += raw_loss.sum().item()
             
-            train_biaffine_loss += raw_biaffine_loss.item()
+            train_biaffine_loss += raw_biaffine_loss.sum().item()
             tmp_time2 = time.time()
             # print(f"forward time {tmp_time2 - tmp_time:.2f} s")
 
@@ -744,7 +744,9 @@ def main(args):
             num_sents += batch_size
 
             if train_step % args.log_every == 0:    #, B lr {biaffine_optimizer.param_groups[0]['lr']:.6f}
-                logger.info(f"train step {train_step}, T lr {optimizer.param_groups[0]['lr']:.6f}, B lr {left_biaffine_optimizer.param_groups[0]['lr']:.6f}, T loss {train_loss / num_words:.4f}, B loss {train_biaffine_loss:.4f}, ppl {np.exp(train_loss / num_words):.4f}")
+                logger.info(f"train step {train_step}, T lr {optimizer.param_groups[0]['lr']:.6f}, B lr {left_biaffine_optimizer.param_groups[0]['lr']:.6f}, T loss {train_loss / num_words:.4f}, B loss {train_biaffine_loss / num_words:.4f}")
+                if (train_loss + train_biaffine_loss) / num_words <= 30:
+                    logger.info(f"token ppl {np.exp(train_loss / num_words):.4f}, total ppl {np.exp((train_loss + train_biaffine_loss) / num_words):.4f}")
                 num_words = 0
                 num_sents = 0
                 train_loss = 0.0  
