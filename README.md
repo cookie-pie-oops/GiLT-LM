@@ -31,6 +31,7 @@ If you have a SDP graph, transfer it into the format given below in a json file:
     "dm_graph": [...],
     "pas_graph": [...]
 }
+```
 
 Then use `./data_process/add_arc_to_corpus.py` to generate two edge label file as the input of training part.
 
