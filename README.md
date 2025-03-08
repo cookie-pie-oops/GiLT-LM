@@ -22,7 +22,7 @@ If you have a SDP graph, transfer it into the format given below in a json file:
             "id": "1",
             "form": "We",
             "head": [
-                “head id 1”,
+                "head id 1",
                 "head id 2",
                 "..."
             ]
