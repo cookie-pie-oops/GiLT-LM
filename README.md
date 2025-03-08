@@ -14,19 +14,20 @@ We split the BLLIP corpus into train, dev and test sets with `./data_process/BLL
 
 If you have a SDP graph, transfer it into the format given below in a json file:
 
+```json
 {
     "text": "We use ...",
     "psd_graph": [
-            {
-                "id": "1",
-                "form": "We",
-                "head":[
-                    head_id,
-                    ...
-                ]
-            },
-            ...
-            ],
+        {
+            "id": "1",
+            "form": "We",
+            "head": [
+                head_id,
+                ...
+            ]
+        },
+        ...
+    ],
     "dm_graph": [...],
     "pas_graph": [...]
 }
