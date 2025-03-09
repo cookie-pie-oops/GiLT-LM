@@ -550,7 +550,7 @@ def main(args):
     train_step = 0
     remaining_epoch = 0
     
-    checkpoint_step = 1000
+    checkpoint_step = 0
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0

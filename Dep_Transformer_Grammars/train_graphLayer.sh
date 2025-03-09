@@ -2,26 +2,25 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_1:2_degree_undirected_embedding_ACE.out
+#SBATCH --output=graphlayer_large_psd_4_1:1_degree_DTG.out
 
-# --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_undirected_embedding_ACE.pt \
+# --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 export DATASET=psd
-export DATASIZE=small
+export DATASIZE=large
 export RELTYPE=degree
-export LOSSRATIO=2
+export LOSSRATIO=1
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
-    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
-    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_undirected_embedding_ACE.txt \
+    --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
+    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
+    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_undirected_embedding_ACE.pt \
-    --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_undirected_embedding_ACE.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
