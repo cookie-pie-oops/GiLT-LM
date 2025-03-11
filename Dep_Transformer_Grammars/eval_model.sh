@@ -2,7 +2,7 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_1:1_degree_undirected_embedding_ACE.out
+#SBATCH --output=graphlayer_small_psd_4_1:1_degree_ACE.out
 export DATASET=psd
 export RELTYPE=degree
 export EVALTYPE=normal    #estimate
@@ -14,7 +14,7 @@ python eval_model.py \
     --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_$DATASET\_4_1:1_$RELTYPE\_undirected_embedding_ACE.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:1_$RELTYPE\_ACE.pt \
     --eval_type $EVALTYPE \
     --sampling_num 300 \
     --rel_type $RELTYPE \

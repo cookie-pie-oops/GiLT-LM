@@ -274,6 +274,9 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
     loss_list = []
     bce_loss = torch.nn.BCELoss(reduction="sum")
     logger = get_logger()
+    acc_num = 0
+    infer_num = 0
+    label_num = 0
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -319,6 +322,25 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
                             
                             left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
                             right_gt = sent_right_label[words_index - 1]
+
+                            left_pred = torch.where(left_logits > 0.5)  # start from 0, 0 means root, word start from 1
+                            right_pred = torch.where(right_logits > 0.5)
+
+                            if left_gt:
+                                label_num += len(left_gt)
+                            if right_gt:
+                                label_num += len(right_gt)
+                            
+                            infer_num += len(left_pred[0]) + len(right_pred[0])
+
+                            if left_pred:
+                                for l in left_pred[0]:
+                                    if l.item() in left_gt:
+                                        acc_num += 1
+                            if right_pred:
+                                for r in right_pred[0]:
+                                    if r.item() in right_gt:
+                                        acc_num += 1
 
                             # left_gt_tensor = torch.zeros(words_index).double().to(words_piece_input.device)
                             if not left_gt:
@@ -395,6 +417,20 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
     else:
         logger.info(f"eval token ppl {ppl:.4f}")
         logger.info(f"eval ppl with biaffine loss w/o sampling {ppl_biaffine:.4f}")
+
+        if infer_num == 0:
+            f_1 = 0
+            logger.info("Infer nothing...")
+            pre = 0
+            recall = 0
+        else:
+            pre = acc_num / infer_num
+            recall = acc_num / label_num
+            if pre == 0 or recall == 0:
+                f_1 = 0
+            else:
+                f_1 = 2 * pre * recall / (pre + recall)
+        logger.info(f"pre {pre:.4f}, rec {recall:.4f}, F1 {f_1:.4f}")
 
     model.train()
     return ppl, uas

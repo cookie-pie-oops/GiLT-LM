@@ -2,25 +2,28 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_large_psd_4_1:1_degree_DTG.out
+#SBATCH --output=graphlayer_small_psd_4_1:1_distance_ACE.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
+# Ablation: 1. 0-rel
+# Test: 1. SG-test; 2. SDP parser
+
 export DATASET=psd
-export DATASIZE=large
-export RELTYPE=degree
+export DATASIZE=small
+export RELTYPE=distance
 export LOSSRATIO=1
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
-    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
-    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.txt \
+    --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
+    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
+    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
@@ -73,3 +76,8 @@ python train_graphLayer.py \
     # --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
     # --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     # --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
+
+# DTG
+    # --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
+    # --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
+    # --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \

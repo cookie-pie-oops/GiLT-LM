@@ -320,7 +320,12 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             #     words_piece_input = torch.stack([torch.zeros(args.w_dim).cuda()] + words_input[:words_index])
                             # else:
                             #     words_piece_input = torch.stack([torch.zeros(args.w_dim)] + words_input[:words_index])
-                            words_piece_input = torch.stack(words_input[:words_index])
+                            if words_index != 1:
+                                words_piece_input = torch.stack(words_input[:words_index - 1])
+                            elif torch.cuda.is_available():
+                                words_piece_input = torch.Tensor([[]]).cuda()
+                            else:
+                                words_piece_input = torch.Tensor([[]])
                             left_logits = left_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input.view(1, -1, args.w_dim)).squeeze()
                             right_logits = right_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input.view(1, -1, args.w_dim)).squeeze()
                             left_pred = torch.where(left_logits > 0.5)  # start from 0, 0 means root, word start from 1
@@ -331,28 +336,17 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
 
                             if left_gt:
                                 label_num += len(left_gt)
-                            # else:
-                            #     label_num += 1  # to itself
-                            #     left_gt = [words_index]
-
                             if right_gt:
                                 label_num += len(right_gt)
-                            # else:
-                            #     label_num += 1
-                            #     right_gt = [words_index]
                             
                             infer_num += len(left_pred[0]) + len(right_pred[0])
 
                             if left_pred:
                                 for l in left_pred[0]:
-                                    # if l.item() + 1 == words_index and 0 in left_gt:
-                                    #     acc_num += 1
                                     if l.item() in left_gt:
                                         acc_num += 1
                             if right_pred:
                                 for r in right_pred[0]:
-                                    # if r.item() + 1 == words_index and 0 in right_gt:
-                                    #     acc_num += 1
                                     if r.item() in right_gt:
                                         acc_num += 1
 

@@ -384,6 +384,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
             # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
             # attn_relpos = torch.zeros_like(attn_relpos)
+            # attn_relpos = torch.arange(1, attn_relpos.shape[1] + 1).unsqueeze(0).repeat(attn_relpos.shape[0], attn_relpos.shape[2], 1).cuda()
             attn_relpos = attn_relpos.permute(1, 2, 0)
             depth_biases = self.depth_embed(attn_relpos)
             Moderate_BD = torch.einsum('ibnd,ijbd->ijbn', (w_head_q, depth_biases))
@@ -554,7 +555,6 @@ class TransformerGrammar(nn.Module):
             attn_relpos = None
 
         elif use_mask == 'graphlayer':
-            max_graphlayer_rel = 0
             length_i = max([len(sent) for sent in x])
             for sent in x:
                 src_ = sent[:-1]
@@ -578,37 +578,57 @@ class TransformerGrammar(nn.Module):
 
             attn_relpos = []
             if rel_type == "degree":
-                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
-                    Degree_out = [0]*(length_i + 1)
-                    Degree_in = [0]*(length_i + 1)
-                    graph = np.zeros((length_i + 1, length_i + 1))
-                    sent_attn_relpos = []
-                    for i in range(len(left_sent_arrow)):
-                        if left_sent_arrow[i]:  #i <- j
-                            for j in left_sent_arrow[i]:
-                                graph[j][i + 1] = 1
-                                Degree_out[j - 1] += 1
-                                Degree_in[i] += 1
-                        if right_sent_arrow[i]: #i -> j
-                            for j in right_sent_arrow[i]:
-                                graph[i + 1][j] = 1
-                                Degree_in[j - 1] += 1
-                                Degree_out[i] += 1
-                        rel_pos_1 = Degree_out[:-1]
-                        rel_pos_2 = Degree_in[:-1]
+                for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
+                    input_size = len(sent_index_to_id) - 1
+                    id_to_index = {}
+                    for i in range(len(sent_index_to_id)):
+                        if sent_index_to_id[i] != -1:
+                            if sent_index_to_id[i] not in id_to_index:
+                                id_to_index[sent_index_to_id[i]] = [i]
+                            else:
+                                id_to_index[sent_index_to_id[i]].append(i)
+
+                    sent_attn_relpos = np.zeros((length_i, length_i))
+                    sent_attn_relpos_step = np.zeros((length_i))
+                    finished_word_idx = 0
+                    for i in range(input_size):
+                        if sent_index_to_id[i] == -1:
+                            continue
+                        tmp_finished_word_idx = finished_word_idx
+                        finished_word_idx = sent_index_to_id[i] - 1
+                        if finished_word_idx != tmp_finished_word_idx:
+                            add_arc_idx = finished_word_idx
+                            if left_sent_arrow[add_arc_idx - 1]:  #i <- j
+                                for j in left_sent_arrow[add_arc_idx - 1]:
+                                    if j != 0:
+                                        sent_attn_relpos_step[id_to_index[j]] += 10
+                                    sent_attn_relpos_step[id_to_index[add_arc_idx]] += 1
+                            if right_sent_arrow[add_arc_idx - 1]: #i -> j
+                                for j in right_sent_arrow[add_arc_idx - 1]:
+                                    sent_attn_relpos_step[id_to_index[j]] += 1
+                                    sent_attn_relpos_step[id_to_index[add_arc_idx]] += 10
+                        sent_attn_relpos[i] = copy.deepcopy(sent_attn_relpos_step)
                         # Wk R
                         # rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]
                         # rel_pos_2 = rel_pos_2[(i+1):] + rel_pos_2[:(i+1)]
-                        sent_attn_relpos.append(copy.deepcopy(10 * np.array(rel_pos_1) + 1 * np.array(rel_pos_2)))
-                    max_graphlayer_rel = max(Degree_out[:-1])
-                    for j in range(length_i - len(sent_attn_relpos)):
-                        sent_attn_relpos.append([0]*(length_i))
+                    # for j in range(length_i - len(sent_attn_relpos)):
+                    #     sent_attn_relpos.append([0]*(length_i))
                     attn_relpos.append(sent_attn_relpos)
                     # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
             elif rel_type == "depth":
-                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
-                    graph = np.zeros((length_i + 1, length_i + 1))
-                    sent_attn_relpos = []
+                for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
+                    input_size = len(sent_index_to_id) - 1
+                    id_to_index = {}
+                    for i in range(len(sent_index_to_id)):
+                        if sent_index_to_id[i] != -1:
+                            if sent_index_to_id[i] not in id_to_index:
+                                id_to_index[sent_index_to_id[i]] = [i]
+                            else:
+                                id_to_index[sent_index_to_id[i]].append(i)
+                    
+                    graph_len = len(left_sent_arrow) + 1
+                    graph = np.zeros((graph_len, graph_len))
+                    sent_attn_relpos = np.zeros((length_i, length_i))
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
@@ -618,16 +638,31 @@ class TransformerGrammar(nn.Module):
                             for j in right_sent_arrow[i]:
                                 graph[i + 1][j] = 1
                                 graph[j][i + 1] = 1
-                        
-                        depth = calculate_depth(graph)
-                        sent_attn_relpos.append(copy.deepcopy(np.array(depth[1:])))
-                    for j in range(length_i - len(sent_attn_relpos)):
-                        sent_attn_relpos.append([0]*(length_i))
+                    
+                    for i in range(input_size):
+                        if sent_index_to_id[i] == -1:
+                            continue
+                        finished_word_idx = sent_index_to_id[i] - 1
+                        depth = calculate_depth(graph[:sent_index_to_id[i], :sent_index_to_id[i]])
+                        for id, depth_value in enumerate(depth[1:]):
+                            sent_attn_relpos[i, id_to_index[id + 1]] = depth_value
+                    # for j in range(length_i - len(sent_attn_relpos)):
+                    #     sent_attn_relpos.append([0]*(length_i))
                     attn_relpos.append(sent_attn_relpos)
             elif rel_type == "distance":
-                for left_sent_arrow, right_sent_arrow in zip(left_sents_arrow, right_sents_arrow):
-                    graph = np.zeros((length_i + 1, length_i + 1))
-                    sent_attn_relpos = []
+                for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
+                    input_size = len(sent_index_to_id) - 1
+                    id_to_index = {}
+                    for i in range(len(sent_index_to_id)):
+                        if sent_index_to_id[i] != -1:
+                            if sent_index_to_id[i] not in id_to_index:
+                                id_to_index[sent_index_to_id[i]] = [i]
+                            else:
+                                id_to_index[sent_index_to_id[i]].append(i)
+                    
+                    graph_len = len(left_sent_arrow) + 1
+                    graph = np.zeros((graph_len, graph_len))
+                    sent_attn_relpos = np.zeros((length_i, length_i))
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
@@ -637,11 +672,17 @@ class TransformerGrammar(nn.Module):
                             for j in right_sent_arrow[i]:
                                 graph[i + 1][j] = 1
                                 graph[j][i + 1] = 2  #2
-                        
-                        distance = dijkstra(graph, i + 1)
-                        sent_attn_relpos.append(copy.deepcopy(np.array(distance[1:])))
-                    for j in range(length_i - len(sent_attn_relpos)):
-                        sent_attn_relpos.append([0]*(length_i))
+
+                    for i in range(input_size):
+                        if sent_index_to_id[i] == -1:
+                            continue
+                        finished_word_idx = sent_index_to_id[i] - 1
+                        distance = dijkstra(graph[:sent_index_to_id[i], :sent_index_to_id[i]], finished_word_idx)
+                        for id, distance_value in enumerate(distance[1:]):
+                            sent_attn_relpos[i, id_to_index[id + 1]] = distance_value
+
+                    # for j in range(length_i - len(sent_attn_relpos)):
+                        # sent_attn_relpos.append([0]*(length_i))
                     attn_relpos.append(sent_attn_relpos)
                 
             attn_relpos = torch.LongTensor(np.array(attn_relpos))
@@ -850,8 +891,7 @@ class TransformerGrammar(nn.Module):
 
         seq_len = inputs.size(0)
 
-        word_emb = self.emb(inputs)
-        
+        word_emb = self.emb(inputs)     
         if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None" or use_mask == 'sdp_arc' or use_mask == 'graphlayer':
             pos_emb = self.pos_emb(torch.arange(seq_len-1, -1, -1.0, device=word_emb.device))
             if use_mask == 'graphlayer':
