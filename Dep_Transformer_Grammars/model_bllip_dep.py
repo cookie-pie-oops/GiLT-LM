@@ -167,15 +167,21 @@ class BiaffineAttention(nn.Module):
         # input1 = self.f_1(input1) #1*d
         # input2 = self.f_2(input2) #l*d
         if self.type == "Multi":
+            # B = input2.size(0)
+            # root_tokens = self.root_representation.repeat(B, 1, 1)
+            # input2 = torch.cat((root_tokens, input2), dim=1)
             B = input2.size(0)
-            root_tokens = self.root_representation.repeat(B, 1, 1)
-            input2 = torch.cat((root_tokens, input2), dim=1)
+            repeat_shape = list(input2.shape)
+            repeat_shape[-1] = 1
+            repeat_shape[-2] = 1
+            root_tokens = self.root_representation.repeat(*repeat_shape)
+            input2 = torch.cat((root_tokens, input2), dim=input2.dim() - 2)
 
         H_2 = self.W(input2) # d*l
-        score = torch.matmul(input1, H_2.transpose(1,2))  # b1d * bdl = b1l
+        score = torch.matmul(input1, H_2.transpose(input2.dim() - 2, input2.dim() - 1))  # b1d * bdl = b1l
 
-        score += torch.matmul(self.U, input1.transpose(1,2))  # 1d * bd1 = b11
-        score += torch.matmul(self.V, input2.transpose(1,2))  # 1d * bdl = b1l
+        score += torch.matmul(self.U, input1.transpose(input2.dim() - 2, input2.dim() - 1))  # 1d * bd1 = b11
+        score += torch.matmul(self.V, input2.transpose(input2.dim() - 2, input2.dim() - 1))  # 1d * bdl = b1l
 
         score += self.bias  # b,1,l
         score = score.to(torch.float64)
@@ -312,7 +318,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.depth_embed = torch.nn.Embedding(151, self.d_head)
+        self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
         , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
@@ -336,7 +342,12 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 # print(w.shape)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
-            
+            if attn_relpos is not None:
+                r2 = torch.arange(151-1, -1, -1.0, device=w.device).long()
+                depth_biases = self.depth_embed(r2)
+                Moderate_rk = self.r_net(depth_biases)
+                Moderate_rk = Moderate_rk.view(max_len + 1, self.n_head, self.d_head)
+
             w_head_q, w_head_k, w_head_v = torch.chunk(w_heads, 3, dim=-1)
             # _, w_head_k, _ = torch.chunk(w_graphlayer, 3, dim=-1)
         # #test    
@@ -386,10 +397,9 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             # attn_relpos = torch.zeros_like(attn_relpos)
             # attn_relpos = torch.arange(1, attn_relpos.shape[1] + 1).unsqueeze(0).repeat(attn_relpos.shape[0], attn_relpos.shape[2], 1).cuda()
             attn_relpos = attn_relpos.permute(1, 2, 0)
-            depth_biases = self.depth_embed(attn_relpos)
-            Moderate_BD = torch.einsum('ibnd,ijbd->ijbn', (w_head_q, depth_biases))
-            # attn_relpos = (max_len - attn_relpos).long()
-            BD = self._rel_shift(BD) + Moderate_BD
+            Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, Moderate_rk))
+            attn_relpos = (max_len - attn_relpos).long()
+            BD = self._rel_shift(BD) + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
             # BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
 
             # WkD
@@ -601,12 +611,12 @@ class TransformerGrammar(nn.Module):
                             if left_sent_arrow[add_arc_idx - 1]:  #i <- j
                                 for j in left_sent_arrow[add_arc_idx - 1]:
                                     if j != 0:
-                                        sent_attn_relpos_step[id_to_index[j]] += 10
+                                        sent_attn_relpos_step[id_to_index[j]] += 10 # 10
                                     sent_attn_relpos_step[id_to_index[add_arc_idx]] += 1
                             if right_sent_arrow[add_arc_idx - 1]: #i -> j
                                 for j in right_sent_arrow[add_arc_idx - 1]:
                                     sent_attn_relpos_step[id_to_index[j]] += 1
-                                    sent_attn_relpos_step[id_to_index[add_arc_idx]] += 10
+                                    sent_attn_relpos_step[id_to_index[add_arc_idx]] += 10 # 10
                         sent_attn_relpos[i] = copy.deepcopy(sent_attn_relpos_step)
                         # Wk R
                         # rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]

@@ -2,17 +2,18 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_1:1_distance_ACE.out
+#SBATCH --output=graphlayer_small_psd_4_1:10_degree_ACE.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 # Ablation: 1. 0-rel
 # Test: 1. SG-test; 2. SDP parser
+# estimate 并行100句
 
 export DATASET=psd
 export DATASIZE=small
-export RELTYPE=distance
-export LOSSRATIO=1
+export RELTYPE=degree
+export LOSSRATIO=10
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \

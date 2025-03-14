@@ -574,11 +574,12 @@ def main(args):
                 #         left_biaffine_scheduler.step()
                 #         right_biaffine_scheduler.step()
                 #     else:
-                #         for i in range(len(optimizer.param_groups)):
-                #             optimizer.param_groups[i]['lr'] = args.stable_lr
-                #         for i in range(len(left_biaffine_optimizer.param_groups)):
-                #             left_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
-                #             right_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
+                #         for j in range(len(optimizer.param_groups)):
+                #             optimizer.param_groups[j]['lr'] = args.stable_lr
+                #         for j in range(len(left_biaffine_optimizer.param_groups)):
+                #             left_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
+                #         for j in range(len(right_biaffine_optimizer.param_groups)):
+                #             right_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
                 continue
             # torch.cuda.empty_cache()
             tmp_time = time.time()
@@ -700,7 +701,7 @@ def main(args):
             # print(f"Biaffine forwarding takes {time.time()-biaffine_start:.2f} seconds")
             raw_loss = ret
             raw_biaffine_loss = torch.stack(biaffine_loss)
-            loss = 1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean()
+            loss = 2 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
             train_loss += raw_loss.sum().item()
             
             train_biaffine_loss += raw_biaffine_loss.sum().item()
@@ -712,6 +713,8 @@ def main(args):
             
             if args.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(left_biaffine_model.parameters(), args.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(right_biaffine_model.parameters(), args.max_grad_norm)
             optimizer.step()
             left_biaffine_optimizer.step()
             right_biaffine_optimizer.step()
@@ -728,11 +731,12 @@ def main(args):
                     left_biaffine_scheduler.step()
                     right_biaffine_scheduler.step()
                 else:
-                    for i in range(len(optimizer.param_groups)):
-                        optimizer.param_groups[i]['lr'] = args.stable_lr
-                    for i in range(len(left_biaffine_optimizer.param_groups)):
-                        left_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
-                        right_biaffine_optimizer.param_groups[i]['lr'] = args.stable_lr
+                    for j in range(len(optimizer.param_groups)):
+                        optimizer.param_groups[j]['lr'] = args.stable_lr
+                    for j in range(len(left_biaffine_optimizer.param_groups)):
+                        left_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
+                    for j in range(len(right_biaffine_optimizer.param_groups)):
+                        right_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
             # print(f"backward time {tmp_time3 - tmp_time2:.2f} s")
             num_words += total_length
             num_sents += batch_size
@@ -784,11 +788,12 @@ def main(args):
                     remaining_epoch += 1
                     if remaining_epoch >= args.decay_interval:
                         remaining_epoch = 0
-                        for i in range(len(optimizer.param_groups)):
-                            optimizer.param_groups[i]['lr'] = max(optimizer.param_groups[i]['lr'] * args.decay_rate, args.min_lr)
-                        for i in range(len(left_biaffine_optimizer.param_groups)):
-                            left_biaffine_optimizer.param_groups[i]['lr'] = max(left_biaffine_optimizer.param_groups[i]['lr'] * args.decay_rate, args.min_lr)
-                            right_biaffine_optimizer.param_groups[i]['lr'] = max(right_biaffine_optimizer.param_groups[i]['lr'] * args.decay_rate, args.min_lr)
+                        for j in range(len(optimizer.param_groups)):
+                            optimizer.param_groups[j]['lr'] = max(optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
+                        for j in range(len(left_biaffine_optimizer.param_groups)):
+                            left_biaffine_optimizer.param_groups[j]['lr'] = max(left_biaffine_optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
+                        for j in range(len(right_biaffine_optimizer.param_groups)):
+                            right_biaffine_optimizer.param_groups[j]['lr'] = max(right_biaffine_optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
                         logger.info(f"decay lr to {optimizer.param_groups[0]['lr']:.6f}")
     
     end_time = time.time()
