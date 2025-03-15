@@ -2,29 +2,30 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_100:1_degree_ACE_sameembed.out
+#SBATCH --output=graphlayer_small_psd_4_5:4_degree_DTG_sameembed_nomultiply.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 # Ablation: 1. 0-rel
 # Test: 1. SG-test; 2. SDP parser
 # To do list: important sampling
+# 1. 2倍loss 2. global embedding 3. 5：1, 1:1 4. r_k和r_q*embedding
 
 export DATASET=psd
 export DATASIZE=small
 export RELTYPE=degree
-export LOSSRATIO=0.01
+export LOSSRATIO=0.8
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
-    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
-    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_sameembed.txt \
+    --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
+    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
+    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_sameembed.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \

@@ -701,7 +701,7 @@ def main(args):
             # print(f"Biaffine forwarding takes {time.time()-biaffine_start:.2f} seconds")
             raw_loss = ret
             raw_biaffine_loss = torch.stack(biaffine_loss)
-            loss = 2 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
+            loss = 1 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
             train_loss += raw_loss.sum().item()
             
             train_biaffine_loss += raw_biaffine_loss.sum().item()

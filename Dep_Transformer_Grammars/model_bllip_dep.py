@@ -93,16 +93,16 @@ def has_cycle(adj_matrix):
     in_degree = [0] * n
     topological_order = []
     
-    # 计算每个节点的入度
+    # in_degree of each node
     for i in range(n):
         for j in range(n):
             if adj_matrix[j][i] == 1:
                 in_degree[i] += 1
     
-    # 将所有入度为0的节点加入队列
+    # find the nodes with in_degree 0
     queue = [i for i in range(n) if in_degree[i] == 0]
     
-    # 进行拓扑排序
+    # topological sort
     while queue:
         current = queue.pop(0)
         topological_order.append(current)
@@ -112,7 +112,7 @@ def has_cycle(adj_matrix):
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
     
-    # 检查结果
+    # check if there is a cycle
     return len(topological_order) != n
 
 
@@ -318,7 +318,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+        # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
         , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
@@ -343,8 +343,8 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
             if attn_relpos is not None:
-                r2 = torch.arange(151-1, -1, -1.0, device=w.device).long()
-                depth_biases = self.depth_embed(r2)
+                r2 = torch.arange(max_len, -1, -1.0, device=w.device).long()
+                depth_biases = depth_embed(r2)
                 Moderate_rk = self.r_net(depth_biases)
                 Moderate_rk = Moderate_rk.view(max_len + 1, self.n_head, self.d_head)
 
@@ -524,7 +524,7 @@ class TransformerGrammar(nn.Module):
             self.layers.append(TransformerGrammarLayer(n_head, w_dim, d_head, 
                                 d_inner, dropout, dropoutatt, tgt_len = None, 
                                 ext_len = None, mem_len = None,
-                                pre_lnorm = pre_lnorm, depth_embed = self.depth_embed))
+                                pre_lnorm = pre_lnorm))
         
         self.pos_emb = PositionalEmbedding(w_dim)
         self.r_w_bias = nn.Parameter(torch.Tensor(self.n_head, self.d_head))
@@ -928,7 +928,7 @@ class TransformerGrammar(nn.Module):
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
             core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
-                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length)
+                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length, depth_embed = self.depth_embed)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)
