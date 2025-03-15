@@ -318,10 +318,10 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+        # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
-        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
+        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)  # L, M-m, B
         # print(qlen, rlen)
         # r: M-m * None * d_model
@@ -462,18 +462,22 @@ class TransformerGrammarLayer(nn.Module):
                             d_head, dropouta, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
-    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None, mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
+    def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None,
+        mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values, cache=cache)
+                                min_len=min_len, max_len=max_len, mems=mems,
+                                terminal=terminal, past_keys=past_keys, past_values=past_values,
+                                cache=cache, depth_embed=depth_embed)
             output = self.pos_ff(output)
 
             return output, new_key, new_value
         else:
             output = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
-                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal, past_keys=past_keys, past_values=past_values)
+                                min_len=min_len, max_len=max_len, mems=mems, terminal=terminal,
+                                past_keys=past_keys, past_values=past_values, depth_embed=depth_embed)
             output = self.pos_ff(output)
             
             return output
@@ -515,12 +519,12 @@ class TransformerGrammar(nn.Module):
         self.w_dim = w_dim
             
         self.layers = nn.ModuleList()
-
+        self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
         for _ in range(num_layers):
             self.layers.append(TransformerGrammarLayer(n_head, w_dim, d_head, 
                                 d_inner, dropout, dropoutatt, tgt_len = None, 
                                 ext_len = None, mem_len = None,
-                                pre_lnorm = pre_lnorm))
+                                pre_lnorm = pre_lnorm, depth_embed = self.depth_embed))
         
         self.pos_emb = PositionalEmbedding(w_dim)
         self.r_w_bias = nn.Parameter(torch.Tensor(self.n_head, self.d_head))
