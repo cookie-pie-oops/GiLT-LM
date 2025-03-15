@@ -318,7 +318,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
 
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+        self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
         , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
