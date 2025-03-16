@@ -10,7 +10,7 @@ import time, math
 import json
 from torch import cuda
 from helping_utils.logger import configure_logger, get_logger
-from model_bllip_dep import TransformerGrammar
+from model_bllip_dep import PushdownTransformerConstituency
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_file', default='data/train_LG_bllip_action.csv', type=str)
@@ -536,7 +536,7 @@ def main(args):
     if torch.cuda.is_available():
         cuda.set_device(args.gpu)
     if args.model_file == '':
-        model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
+        model = PushdownTransformerConstituency(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
                                    eos_id, left_arc, right_arc, pop_root, startofword_id, args.pre_lnorm)
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")

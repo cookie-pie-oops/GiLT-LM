@@ -10,7 +10,7 @@ import time
 from helping_utils.logger import configure_logger, get_logger
 from TGAgent import TGAgent
 from masking_bllip.utils import TokenTypeRanges
-from model_bllip_dep import TransformerGrammar
+from model_bllip_dep import PushdownTransformerConstituency
 from copy import deepcopy
 import json
 import re
