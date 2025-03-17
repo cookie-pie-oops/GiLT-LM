@@ -440,40 +440,58 @@ class AttachmentHead(nn.Module):
       - 返回形状为 (B, T, T+1) 的 attachment logits（经过因果 mask 后）
     """
 
-    def __init__(self, d_model, embd_dim, max_depth=200):
+    def __init__(self, d_model, embd_dim, max_depth=200, dropout=0.1):
         super(AttachmentHead, self).__init__()
-        self.n_embd = d_model
-        self.embd_dim = embd_dim
-        # 将输入 x 映射到 query 和 key（拼接后维度为 2*embd_dim）
-        self.data_to_qk = nn.Linear(d_model, 2 * embd_dim)
+        self.d_model = d_model
+        self.embd_dim = embd_dim # dim of the embedding of words
+        # 将输入 x 映射到 query 和 key（拼接后维度为 4*embd_dim）
+        self.data_to_qk = nn.Linear(d_model, 4 * d_model) # FIXME: check the dim of q,k; in the original codebase it's 2*embd_dim
         # 用于计算 next_word 的 query 与 key 的 MLP，
         # 输入为拼接后的 [q, next_word]，输出维度为 embd_dim
-        self.q_next_word_mlp = nn.Linear(2 * embd_dim, embd_dim)
-        self.k_next_word_mlp = nn.Linear(2 * embd_dim, embd_dim)
+        self.q_next_word_mlp = nn.Sequential(
+            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(2 * d_model, 2 * d_model),
+        )
+        self.k_next_word_mlp = nn.Sequential(
+            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(2 * d_model, 2 * d_model),
+        )
         # 将 key 与堆栈深度信息拼接后映射回 embd_dim
-        self.key_and_stack_mlp = nn.Linear(2 * embd_dim, embd_dim)
+        self.key_and_stack_mlp = nn.Sequential(
+            nn.Linear(2 * d_model + embd_dim, 2 * d_model + embd_dim),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
+        )
         # 堆栈深度嵌入
         self.beta = nn.Embedding(max_depth, embd_dim)
         # 这里 bias 我们在 forward 中动态生成因果 mask
         
-        self.scale = 1 / (embd_dim ** 0.5)
+        # size of q/k/v is 2*d_model=D
+        self.scale = 1 / ((2 * d_model) ** 0.5)
 
     def forward(self, x, stack_tape, next_word):
-        # next_word 是当前预测的 token，形状为 (B, T, embd_dim)
-        # x 是隐藏状态序列，形状为 (B, T, n_embd)
+        # next_word 是当前预测的 token，形状为 (B, T, embd_dim = d_model now)
+        # x 是隐藏状态序列，形状为 (B, T, d_model)
 
         B, T, C = x.size()
         # 得到 q 和 k，形状均为 (B, T, embd_dim)
         qk = self.data_to_qk(x)
-        q, k = torch.split(qk, self.embd_dim, dim=2)
+        q, k = torch.split(qk, 2*self.embd_dim, dim=2) # (B, T, 2*d_model) each
 
         # 计算 next_word 的 query 与 key
         # 拼接 [q, next_word]，假设 next_word 的最后一维与 embd_dim 相同
-        cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*embd_dim)
-        next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, embd_dim)
-        next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, embd_dim)
+        cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*d_model)
+        next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, 2*d_model)
+        next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, 2*d_model)
+        
+        # D = 2*d_model
 
-        # 将 k 扩展到每个目标位置： (B, T, embd_dim) -> (B, 1, T, embd_dim) -> (B, T, T, embd_dim)
+        # 将 k 扩展到每个目标位置： (B, T, D) -> (B, 1, T, D) -> (B, T, T, D)
         k_exp = k.unsqueeze(1).repeat(1, T, 1, 1)
 
         # 计算堆栈深度嵌入：stack_tape (B, T) -> (B, T, embd_dim)
@@ -483,12 +501,12 @@ class AttachmentHead(nn.Module):
 
         # 拼接 k 与深度信息，通过 MLP 得到融合后的 k 信息
         k_with_info = self.key_and_stack_mlp(
-            torch.cat([k_exp, depth_emb], dim=-1))
+            torch.cat([k_exp, depth_emb], dim=-1)) # (B, T, T, D)
         k_with_info = k_with_info * self.scale
 
         # 计算 attachment logits
-        # next_word_q: (B, T, embd_dim) -> unsqueeze为 (B, T, 1, embd_dim)
-        # k_with_info: (B, T, T, embd_dim) -> 转置最后两维得到 (B, T, embd_dim, T)
+        # next_word_q: (B, T, D) -> unsqueeze为 (B, T, 1, D)
+        # k_with_info: (B, T, T, D) -> 转置最后两维得到 (B, T, D, T)
         attach_logits = (next_word_q.unsqueeze(
             2) @ k_with_info.transpose(-2, -1)).squeeze(2)  # (B, T, T)
 
@@ -502,7 +520,8 @@ class AttachmentHead(nn.Module):
         attach_logits_l = torch.cat(
             [attach_logits, pad_tensor], dim=-1)  # (B, T, T+1)
 
-        ### insert logit_self into the off-diagonal positions of logits. i.e. [n_batch, n_dest, n_src] -> [n_batch, n_dest, n_src + 1]
+        ### now insert logits_ self into the k +1 th position of attach_logits for each k
+        # i.e. [n_batch, n_dest, n_src] -> [n_batch, n_dest, n_src + 1]
         # (B, T, 1) -> (B, T, T+1)
         indices = (1 + torch.arange(T, device=attach_logits.device)
                    ).unsqueeze(0).unsqueeze(-1).repeat(B, 1, 1)
@@ -518,6 +537,12 @@ class AttachmentHead(nn.Module):
         # 构造因果 mask：下三角 mask，形状为 (1, T+1, T+1)
         mask = torch.tril(torch.ones(
             T+1, T+1, device=logits.device)).unsqueeze(0)
+        # be like
+        # 1 0 0 0 0
+        # 1 1 0 0 0
+        # 1 1 1 0 0
+        # 1 1 1 1 0
+        # 1 1 1 1 1
         logits = logits.masked_fill(mask == 0, float("-inf"))
 
         # 去掉最上面一行，返回 (B, T, T+1)
@@ -572,7 +597,7 @@ class PushdownTransformerConstituency(nn.Module):
                                 pre_lnorm=pre_lnorm, max_stack_depth=200)
         
         # ATTACHMENT HEAD
-        self.attachment_head = AttachmentHead(w_dim, w_dim, max_depth=max_stack_depth)
+        self.attachment_head = AttachmentHead(d_model=w_dim, embd_dim=w_dim, max_depth=max_stack_depth, dropout=dropout)
         
         # POSITIONAL EMBEDDINGS FOR TXL STRUCTURES
         self.pos_emb = PositionalEmbedding(w_dim)
@@ -584,14 +609,24 @@ class PushdownTransformerConstituency(nn.Module):
         self.eos_id = eos_id
         
 
-    def forward(self, data, target, stack_tape, mems=None, return_h=False):
+    def forward(self, 
+                data, 
+                target, 
+                stack_tape,
+                attachment_labels,
+                attachment_mask,
+                mems=None, 
+                return_h=False):
         
-        # data: x, shape [T, B]
-        # target: y = x[1:] (shifted) 
-        # T+1: real length of x, B: batch size
+        # data: x, shape [T, B], ids of tokens seq[:T] where len(seq) = T+1
+        # target: y = seq[1:T+1], shape [T, B], ids of tokens seq[1:T+1]
+        # T+1: real length of seq, 
+        # B: batch size
         # mems: None for now
         # stack_tape: [B, T(qlen), T(klen)] stack depth information
         # stack_tape[b, t, k] = d means that at time t (where we want to predict t+1), the stack depth of the k-th token is d
+        # attachment_labels: [B, T, T+1] labels for attachment head
+        # attachment_mask: [B, T, T+1] mask for attachment head
 
         if mems is not None:
             raise NotImplementedError("We ignore TXL mems for now.")
@@ -622,19 +657,37 @@ class PushdownTransformerConstituency(nn.Module):
                     self.r_r_bias, dec_attn_mask=dec_attn_mask, mems=None)
             
         # PUSHDOWN LAYER PART
-        # TODO:
-        
+        core_out = self.pushdown_final_layer.forward(core_out, pos_emb, self.r_w_bias,
+                    self.r_r_bias, stack_tape, dec_attn_mask=dec_attn_mask, mems=None)
         
         # FINAL DROPOUT
-        core_out = self.dropout(core_out)
-        
-        
-        # ATTACHMENT HEAD
-        # TODO:
-        
+        core_out = self.dropout(core_out) # shape [T, B, d_model] # h1, h2, ..., hT
         # PROJECTION
-        core_out = self.projection(core_out) # shape [T, B, vocab_size]
-        loss = F.cross_entropy(core_out.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id)
+        logits = self.projection(core_out) # shape [T, B, vocab_size]    
+        # ATTACHMENT HEAD
+        # NOTE: Though in inference, we needs the logits to predict next_word, here we use target directly in training
+        next_word = self.emb(target) # shape [T, B, embd_dim] # x2, x3, ..., xT+1
+
+        # forward needs x shape (B, T, d_model), stack_tape shape (B, T, T), next_word shape (B, T, embd_dim)
+        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2))
+        # r2, r3, ..., rT+1
+        # attach_logits[b, t, t+1] 表示在 t 时刻预测下一个token: hat x t+1, 选择 hat x t+1 作为 reduce (i.e. pure shift) 的概率
+        # attach_logits[b, t, k<=t] 表示在 t 时刻预测下一个token: hat x k, 选择 hat x k 作为 reduce (i.e. reduce + shift) 的概率
+        # attach_logits shape [B, T, T+1]
+        # -100 for masked positions in label seq
+        # apply the attachment mask to the labels
+        # if mask says 0, then we set the label to -100
+        attachment_labels = attachment_labels.masked_fill(attachment_mask == 0, -100)
+        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=-100)
+        
+        # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
+        # needs stack labels (idxs to reduce with) for each time step and do the reduce
+        # NOTE: if attach_logits[b, t, t+1] > 0, then shift, otherwise reduce
+        # and make the logits cross-entropy the target
+
+        # LOSS COMPUTATION
+        loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id)
+        loss = loss_words + loss_attach # XXX: WEIGHTED???
         
         if return_h:
             return loss, core_out
