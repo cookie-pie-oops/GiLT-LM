@@ -117,24 +117,23 @@ def has_cycle(adj_matrix):
 
 
 class MLPforBiaffine(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, inner_dim, output_dim):
         super(MLPforBiaffine, self).__init__()
 
-        self.L_1 = nn.Linear(input_dim, input_dim)
-        self.L_2 = nn.Linear(input_dim, output_dim)
+        self.L_1 = nn.Linear(output_dim, inner_dim)
+        self.L_2 = nn.Linear(inner_dim, output_dim)
 
         nn.init.kaiming_uniform_(self.L_1.weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.L_1.bias)
         nn.init.kaiming_uniform_(self.L_2.weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.L_2.bias)
 
-        self.elu = nn.ELU()
+        self.relu = nn.ReLU()
     
     def forward(self, x):
         x = self.L_1(x)
-        x = self.elu(x)
+        x = self.relu(x)
         x = self.L_2(x)
-        x = self.elu(x)
         return x
 
 class BiaffineAttention(nn.Module):
@@ -142,30 +141,33 @@ class BiaffineAttention(nn.Module):
         super(BiaffineAttention, self).__init__()
 
         self.input_dim = input_dim
+        self.proj_dim = 512
 
-        self.W = nn.Linear(input_dim, input_dim, bias=False)
-        self.V = nn.Parameter(torch.Tensor(1, input_dim))
-        self.U = nn.Parameter(torch.Tensor(1, input_dim))
+        self.W = nn.Linear(self.proj_dim, self.proj_dim, bias=False)
+        self.V = nn.Parameter(torch.Tensor(1, self.proj_dim))
+        self.U = nn.Parameter(torch.Tensor(1, self.proj_dim))
         self.bias = nn.Parameter(torch.Tensor(1))
         self.type = type
 
-        # self.f_1 = MLPforBiaffine(d_model, input_dim)
-        # self.f_2 = MLPforBiaffine(d_model, input_dim)
+        self.f_1 = MLPforBiaffine(d_model, input_dim)
+        self.f_2 = MLPforBiaffine(d_model, input_dim)
+        self.proj1 = nn.Linear(input_dim, self.proj_dim)
+        self.proj2 = nn.Linear(input_dim, self.proj_dim)
+        self.layer_norm_input1 = nn.LayerNorm(input_dim)
+        self.layer_norm_input2 = nn.LayerNorm(input_dim)
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
             self.root_representation = nn.Parameter(torch.Tensor(1, input_dim))
             self.softmax = nn.Sigmoid()
 
-        # nn.init.xavier_uniform_(self.W.weight)
+        nn.init.xavier_uniform_(self.W.weight)
         nn.init.xavier_uniform_(self.U)
         nn.init.xavier_uniform_(self.V)
         nn.init.xavier_uniform_(self.root_representation)
         nn.init.zeros_(self.bias)
     
     def forward(self, input1, input2): # 1*d, l*d
-        # input1 = self.f_1(input1) #1*d
-        # input2 = self.f_2(input2) #l*d
         if self.type == "Multi":
             # B = input2.size(0)
             # root_tokens = self.root_representation.repeat(B, 1, 1)
@@ -177,6 +179,14 @@ class BiaffineAttention(nn.Module):
             root_tokens = self.root_representation.repeat(*repeat_shape)
             input2 = torch.cat((root_tokens, input2), dim=input2.dim() - 2)
 
+        input1 = self.layer_norm_input1(input1)
+        input2 = self.layer_norm_input2(input2)
+        input1 = self.f_1(input1) + input1 #1*d
+        input2 = self.f_2(input2) + input2 #l*d
+
+        input1 = self.proj1(input1)
+        input2 = self.proj2(input2)
+
         H_2 = self.W(input2) # d*l
         score = torch.matmul(input1, H_2.transpose(input2.dim() - 2, input2.dim() - 1))  # b1d * bdl = b1l
 
@@ -185,7 +195,7 @@ class BiaffineAttention(nn.Module):
 
         score += self.bias  # b,1,l
         score = score.to(torch.float64)
-        score = self.softmax(score)   
+        score = self.softmax(score / 2) 
         return score
 
 class PositionalEmbedding(nn.Module):
@@ -681,11 +691,11 @@ class TransformerGrammar(nn.Module):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
                                 graph[j][i + 1] = 1
-                                graph[i + 1][j] = 2  #2
+                                graph[i + 1][j] = 1  #2
                         if right_sent_arrow[i]: #i -> j
                             for j in right_sent_arrow[i]:
                                 graph[i + 1][j] = 1
-                                graph[j][i + 1] = 2  #2
+                                graph[j][i + 1] = 1  #2
 
                     for i in range(input_size):
                         if sent_index_to_id[i] == -1:

@@ -2,7 +2,7 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_5:4_distance_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.out
+#SBATCH --output=graphlayer_small_psd_4_5:4_distance_DTG_sameembed_nomultiply_init_2ln_dynamic_temp1_largeMLP_labelsmooth.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
@@ -22,9 +22,9 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
     --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
     --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp1_largeMLP_labelsmooth.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp1_largeMLP_labelsmooth.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \

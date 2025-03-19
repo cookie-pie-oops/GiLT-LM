@@ -2,9 +2,9 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_100:1_degree_ACE.out
+#SBATCH --output=graphlayer_small_psd_4_2:1_distance_DTG_sameembed_nomultiply_init_1ln_2stage_temp1_clip5.out
 export DATASET=psd
-export RELTYPE=degree
+export RELTYPE=distance
 export EVALTYPE=normal    #estimate
 
  # don't need sampling dev
@@ -12,14 +12,14 @@ export EVALTYPE=normal    #estimate
 python eval_model.py \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
-    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
+    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
+    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_$DATASET\_4_1:0.01_$RELTYPE\_ACE.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:0.5_$RELTYPE\_DTG_sameembed_nomultiply_init_1ln_2stage_temp1_clip5.pt \
     --eval_type $EVALTYPE \
-    --sampling_num 900 \
-    --eval_batch_size 300 \
+    --sampling_num 300 \
+    --eval_batch_size 100 \
     --rel_type $RELTYPE \
     --sentence_level \
     --emb_lr_multiplier 2.0 \
@@ -47,4 +47,5 @@ python eval_model.py \
     # --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     # --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
 # DTG
+    # --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
     # --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \

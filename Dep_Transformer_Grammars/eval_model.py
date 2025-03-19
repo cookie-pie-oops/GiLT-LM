@@ -425,6 +425,9 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model, left_bi
                 batch_mask = torch.stack(batch_mask)
                 left_logits = left_biaffine_model(batch_input1, batch_input2).squeeze()
                 right_logits = right_biaffine_model(batch_input1, batch_input2).squeeze()
+                if left_logits.dim() == 2:
+                    left_logits = left_logits.unsqueeze(1)
+                    right_logits = right_logits.unsqueeze(1)
                 inv_left_labels = batch_mask - batch_left_labels
                 inv_right_labels = batch_mask - batch_right_labels
                 biaffine_ret = -torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels), dim=(1,2))
