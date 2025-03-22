@@ -12,26 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, Callable, List, Union, Tuple
 # logger = get_logger()
 
-class MLPforBiaffine(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(MLPforBiaffine, self).__init__()
 
-        self.L_1 = nn.Linear(input_dim, input_dim)
-        self.L_2 = nn.Linear(input_dim, output_dim)
-
-        nn.init.kaiming_uniform_(self.L_1.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.zeros_(self.L_1.bias)
-        nn.init.kaiming_uniform_(self.L_2.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.zeros_(self.L_2.bias)
-
-        self.elu = nn.ELU()
-    
-    def forward(self, x):
-        x = self.L_1(x)
-        x = self.elu(x)
-        x = self.L_2(x)
-        x = self.elu(x)
-        return x
 class PositionalEmbedding(nn.Module): # also posemb for pushdown
     def __init__(self, demb):
         super(PositionalEmbedding, self).__init__()
@@ -68,6 +49,10 @@ class PositionwiseFF(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         # self.layer_norm = nn.Identity()
         self.pre_lnorm = pre_lnorm
+        
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.CoreNet[0].weight)
+        nn.init.xavier_uniform_(self.CoreNet[3].weight)
 
     def forward(self, inp):
         if self.pre_lnorm:
@@ -108,6 +93,10 @@ class RelMultiHeadAttn(nn.Module):
         self.scale = 1 / (d_head ** 0.5) # scale
 
         self.pre_lnorm = pre_lnorm
+        
+    def init_weights(self):
+        nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
+        nn.init.normal_(self.o_net.weight, 0.0, 0.02)
     
     def _rel_shift(self, x, zero_triu=False):
         zero_pad = torch.zeros((x.size(0), 1, *x.size()[2:]),
@@ -131,6 +120,10 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
         # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
+    def init_weights(self):
+        nn.init.normal_(self.r_net.weight, 0.0, 0.02)
+        super().init_weights()
+        
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)
 
@@ -223,7 +216,8 @@ class PushdownMultiHeadAttn(nn.Module):
         self.n_head = n_head # n_heads | n_head
         self.d_model = d_model # state_size | n_embd
         self.d_head = d_head # projection_size = state_size // n_heads | head_dim
-        self.dropout = dropout # for ordinary & attn
+        # self.dropout = dropout 
+        self.dropout = nn.Dropout(dropout) # for ordinary & attn
         
         # self.qkv_net = nn.Linear(d_model, 3 * n_head * d_head, bias=False) # c_attn
         self.qkv_net = nn.Sequential(
@@ -243,6 +237,11 @@ class PushdownMultiHeadAttn(nn.Module):
         
         self.r_net = nn.Linear(d_model, n_head * d_head, bias=False) # r_net for projecting sinuoidal positional embedding
 
+    def init_weights(self):
+        nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
+        nn.init.normal_(self.o_net.weight, 0.0, 0.02)
+        nn.init.normal_(self.r_net.weight, 0.0, 0.02)
+        
     def _rel_shift(self, x, zero_triu=False):
         zero_pad = torch.zeros((x.size(0), 1, *x.size()[2:]),
                                device=x.device, dtype=x.dtype)
@@ -355,7 +354,8 @@ class PushdownMultiHeadAttn(nn.Module):
 
         # [qlen x klen x bsz x n_head]
         attn_prob = F.softmax(attn_score, dim=1)
-        attn_prob = self.dropatt(attn_prob)
+        # attn_prob = self.dropatt(attn_prob) # FIXME: MAYBE WE NEED SEPARATE DROPOUT FOR ATTENTION
+        attn_prob = self.dropout(attn_prob)
 
         #### compute attention vector
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
@@ -366,7 +366,7 @@ class PushdownMultiHeadAttn(nn.Module):
 
         ##### linear projection
         attn_out = self.o_net(attn_vec)
-        attn_out = self.drop(attn_out)
+        attn_out = self.dropout(attn_out)
 
         if self.pre_lnorm:
             ##### residual connection
@@ -390,6 +390,11 @@ class RelPartialLearnableDecoderLayer(nn.Module):
                             d_head, dropouta, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
+        
+    def init_weights(self):
+        self.dec_attn.init_weights()
+        self.pos_ff.init_weights()
+    
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
@@ -409,11 +414,16 @@ class RelPartialLearnablePushdownLayer(RelPartialLearnableDecoderLayer):
     # the dec_attn is PushdownMultiHeadAttn
     def __init__(self, n_head, d_model, d_head, d_inner, dropoutf, dropouta,
                     **kwargs):
-        super(RelPartialLearnablePushdownLayer, self).__init__(n_head, d_model, d_head, d_inner, dropoutf, dropouta, **kwargs)
+        super(RelPartialLearnablePushdownLayer, self).__init__(n_head, d_model, d_head, d_inner, dropoutf, dropouta, pre_lnorm=kwargs.get('pre_lnorm'))
         self.dec_attn = PushdownMultiHeadAttn(n_head, d_model, d_head, dropouta, 
                                               pre_lnorm=kwargs.get('pre_lnorm'), max_stack_depth=kwargs.get('max_stack_depth'))
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf,
                                      pre_lnorm=kwargs.get('pre_lnorm')) # the original paper seems not adding this??
+        
+    def init_weights(self):
+        self.dec_attn.init_weights()
+        self.pos_ff.init_weights()
+        
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, stack_tape, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias, stack_tape, attn_mask=attn_mask, mems=mems, past_keys=past_keys, past_values=past_values, cache=cache)
@@ -473,6 +483,12 @@ class AttachmentHead(nn.Module):
         
         # size of q/k/v is 2*d_model=D
         self.scale = 1 / ((2 * d_model) ** 0.5)
+        
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.data_to_qk.weight)
+        nn.init.xavier_uniform_(self.q_next_word_mlp[0].weight)
+        nn.init.xavier_uniform_(self.k_next_word_mlp[0].weight)
+        nn.init.xavier_uniform_(self.key_and_stack_mlp[0].weight)
 
     def forward(self, x, stack_tape, next_word):
         # next_word 是当前预测的 token，形状为 (B, T, embd_dim = d_model now)
@@ -494,10 +510,8 @@ class AttachmentHead(nn.Module):
         # 将 k 扩展到每个目标位置： (B, T, D) -> (B, 1, T, D) -> (B, T, T, D)
         k_exp = k.unsqueeze(1).repeat(1, T, 1, 1)
 
-        # 计算堆栈深度嵌入：stack_tape (B, T) -> (B, T, embd_dim)
-        # 再扩展为 (B, 1, T, embd_dim) 并 repeat 到 (B, T, T, embd_dim)
-        depth_emb = self.beta(stack_tape.long()).unsqueeze(
-            1).repeat(1, T, 1, 1)
+        # 计算堆栈深度嵌入：stack_tape (B, T, T) -> (B, T, T, embd_dim=D)
+        depth_emb = self.beta(stack_tape.long())
 
         # 拼接 k 与深度信息，通过 MLP 得到融合后的 k 信息
         k_with_info = self.key_and_stack_mlp(
@@ -608,13 +622,22 @@ class PushdownTransformerConstituency(nn.Module):
         self.bos_id = bos_id
         self.eos_id = eos_id
         
+    def init_weights(self):
+        nn.init.normal_(self.r_w_bias, 0.0, 0.02)
+        nn.init.normal_(self.r_r_bias, 0.0, 0.02)
+        self.emb.weight.data.uniform_(-0.02, 0.02)
+        self.projection.weight = self.emb.weight
+        self.projection.bias.data.zero_()
+        self.attachment_head.init_weights()
+        for layer in self.layers:
+            layer.init_weights()
+        self.pushdown_final_layer.init_weights()
 
     def forward(self, 
                 data, 
                 target, 
                 stack_tape,
                 attachment_labels,
-                attachment_mask,
                 mems=None, 
                 return_h=False):
         
@@ -625,7 +648,7 @@ class PushdownTransformerConstituency(nn.Module):
         # mems: None for now
         # stack_tape: [B, T(qlen), T(klen)] stack depth information
         # stack_tape[b, t, k] = d means that at time t (where we want to predict t+1), the stack depth of the k-th token is d
-        # attachment_labels: [B, T, T+1] labels for attachment head
+        # attachment_labels: [B, T] labels for attachment head, at [:,t] each range from 0 to t+1 (closed)
         # attachment_mask: [B, T, T+1] mask for attachment head
 
         if mems is not None:
@@ -645,7 +668,7 @@ class PushdownTransformerConstituency(nn.Module):
         
         # DECODER ATTENTION MASK
         dec_attn_mask = torch.triu(
-            word_emb.new_ones(qlen, klen), diagonal=1+mlen).byte()[:,:,None]
+            word_emb.new_ones(qlen, klen), diagonal=1+mlen).bool()[:,:,None] # FIXED: NOT .byte() ANYMORE but .bool()
 
         # INITIAL HIDDEN STATE
         core_out = self.dropout(word_emb)
@@ -654,11 +677,11 @@ class PushdownTransformerConstituency(nn.Module):
         # FORWARD PASS
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
-                    self.r_r_bias, dec_attn_mask=dec_attn_mask, mems=None)
+                    self.r_r_bias, attn_mask=dec_attn_mask, mems=None)
             
         # PUSHDOWN LAYER PART
         core_out = self.pushdown_final_layer.forward(core_out, pos_emb, self.r_w_bias,
-                    self.r_r_bias, stack_tape, dec_attn_mask=dec_attn_mask, mems=None)
+                    self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
         
         # FINAL DROPOUT
         core_out = self.dropout(core_out) # shape [T, B, d_model] # h1, h2, ..., hT
@@ -669,15 +692,20 @@ class PushdownTransformerConstituency(nn.Module):
         next_word = self.emb(target) # shape [T, B, embd_dim] # x2, x3, ..., xT+1
 
         # forward needs x shape (B, T, d_model), stack_tape shape (B, T, T), next_word shape (B, T, embd_dim)
-        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2))
+        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1]
         # r2, r3, ..., rT+1
         # attach_logits[b, t, t+1] 表示在 t 时刻预测下一个token: hat x t+1, 选择 hat x t+1 作为 reduce (i.e. pure shift) 的概率
         # attach_logits[b, t, k<=t] 表示在 t 时刻预测下一个token: hat x k, 选择 hat x k 作为 reduce (i.e. reduce + shift) 的概率
         # attach_logits shape [B, T, T+1]
-        # -100 for masked positions in label seq
-        # apply the attachment mask to the labels
-        # if mask says 0, then we set the label to -100
-        attachment_labels = attachment_labels.masked_fill(attachment_mask == 0, -100)
+        # for every sample, every t, logits over T+1 positions
+        
+        # mask the attach_logits with attachment_mask
+        # print("ATTACH MASK", attachment_mask.shape)
+        print("ATTACH LABEL", attachment_labels.shape)
+        print("ATTACH LOGITS", attach_logits.shape)
+        print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
+        # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
+        
         loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=-100)
         
         # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
