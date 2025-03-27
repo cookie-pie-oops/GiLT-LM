@@ -1,7 +1,7 @@
 *.out
 *.txt
-/Dep_Transformer_Grammars/models
-/Dep_Transformer_Grammars/logs
+/models
+/logs
 /Dataset
 /data_process/parser
 /data_process/spm
@@ -10,7 +10,7 @@
 /data_process/token_level_vocab
 /data_process/transition_sequence
 /data_process/transition_sequence_txl
-/Dep_Transformer_Grammars/.dependencies
-/Dep_Transformer_Grammars/data_scripts
+/.dependencies
+/data_scripts
 */__pycache__
 __pycache__

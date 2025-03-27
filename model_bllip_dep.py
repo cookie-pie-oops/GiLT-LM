@@ -705,7 +705,7 @@ class PushdownTransformerConstituency(nn.Module):
         print("ATTACH LOGITS", attach_logits.shape)
         print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
-        
+        attach_logits = attach_logits.contiguous() # otherwise may cause error in view
         loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=-100)
         
         # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
@@ -714,6 +714,8 @@ class PushdownTransformerConstituency(nn.Module):
         # and make the logits cross-entropy the target
 
         # LOSS COMPUTATION
+        logits = logits.contiguous()
+        print("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
         loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id)
         loss = loss_words + loss_attach # XXX: WEIGHTED???
         
