@@ -2,10 +2,10 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_2:1_distance_DTG_sameembed_nomultiply_init_1ln_2stage_temp1_clip5.out
+#SBATCH --output=graphlayer_small_psd_4_degree_DTG_concat_smallerproj_AC_sampling.out
 export DATASET=psd
-export RELTYPE=distance
-export EVALTYPE=normal    #estimate
+export RELTYPE=degree
+export EVALTYPE=estimate    #estimate
 
  # don't need sampling dev
 
@@ -13,10 +13,10 @@ python eval_model.py \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
     --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
-    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
+    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow_300.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_$DATASET\_4_1:0.5_$RELTYPE\_DTG_sameembed_nomultiply_init_1ln_2stage_temp1_clip5.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:0.8_$RELTYPE\_DTG_concat_smallerproj_AC.pt \
     --eval_type $EVALTYPE \
     --sampling_num 300 \
     --eval_batch_size 100 \

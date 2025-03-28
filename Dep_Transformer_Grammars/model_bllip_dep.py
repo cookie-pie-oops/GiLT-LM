@@ -81,9 +81,16 @@ def calculate_depth(adj_matrix):
                         depth[neighbor] = max(depth[current] + 1, depth[neighbor])
     
     bfs(0, "root", use_visited)
-    # for i in range(n):
-    #     if not visited[i]:
-    #         bfs(i, "not_root", use_visited)
+    if len(visited) > 1 and any(visited[1:]):
+        input_str = "root"
+        for i in range(n):
+            if not visited[i]:
+                bfs(i, input_str, use_visited)
+    # else:
+    #     input_str = "not_root"
+    #     for i in range(n):
+    #         if not visited[i]:
+    #             bfs(i, input_str, use_visited)
     
     return depth
 
@@ -120,28 +127,36 @@ class MLPforBiaffine(nn.Module):
     def __init__(self, inner_dim, output_dim):
         super(MLPforBiaffine, self).__init__()
 
+        self.proj = nn.Linear(output_dim * 2, output_dim, bias=False)
         self.L_1 = nn.Linear(output_dim, inner_dim)
         self.L_2 = nn.Linear(inner_dim, output_dim)
+        self.layer_norm_input = nn.LayerNorm(output_dim)
+        # self.dropout1 = nn.Dropout(0.1)
+        # self.dropout2 = nn.Dropout(0.1)
 
-        nn.init.kaiming_uniform_(self.L_1.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.L_1.weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.L_1.bias)
-        nn.init.kaiming_uniform_(self.L_2.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.L_2.weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.L_2.bias)
+        # nn.init.kaiming_normal_(self.proj.weight, mode='fan_in', nonlinearity='relu')
 
         self.relu = nn.ReLU()
     
-    def forward(self, x):
-        x = self.L_1(x)
+    def forward(self, inp):
+        inp = self.proj(inp)
+        x = self.L_1(self.layer_norm_input(inp))
         x = self.relu(x)
+        # x = self.dropout1(x)
         x = self.L_2(x)
-        return x
+        # x = self.dropout2(x)
+        return x + inp
 
 class BiaffineAttention(nn.Module):
     def __init__(self, d_model, input_dim, type="default"):
         super(BiaffineAttention, self).__init__()
-
+        # d_model = 1024
         self.input_dim = input_dim
-        self.proj_dim = 512
+        self.proj_dim = 256
 
         self.W = nn.Linear(self.proj_dim, self.proj_dim, bias=False)
         self.V = nn.Parameter(torch.Tensor(1, self.proj_dim))
@@ -151,20 +166,22 @@ class BiaffineAttention(nn.Module):
 
         self.f_1 = MLPforBiaffine(d_model, input_dim)
         self.f_2 = MLPforBiaffine(d_model, input_dim)
-        self.proj1 = nn.Linear(input_dim, self.proj_dim)
-        self.proj2 = nn.Linear(input_dim, self.proj_dim)
-        self.layer_norm_input1 = nn.LayerNorm(input_dim)
-        self.layer_norm_input2 = nn.LayerNorm(input_dim)
+        self.proj1 = nn.Linear(input_dim, self.proj_dim, bias=False)
+        self.proj2 = nn.Linear(input_dim, self.proj_dim, bias=False)
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
-            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim))
+            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 2))
             self.softmax = nn.Sigmoid()
+            nn.init.xavier_uniform_(self.root_representation)
 
-        nn.init.xavier_uniform_(self.W.weight)
-        nn.init.xavier_uniform_(self.U)
-        nn.init.xavier_uniform_(self.V)
-        nn.init.xavier_uniform_(self.root_representation)
+        nn.init.xavier_normal_(self.W.weight)
+        nn.init.xavier_normal_(self.U)
+        nn.init.xavier_normal_(self.V)
+        # nn.init.kaiming_normal_(self.W.weight, mode='fan_in', nonlinearity='relu')
+        # nn.init.kaiming_normal_(self.U, mode='fan_in', nonlinearity='relu')
+        # nn.init.kaiming_normal_(self.V, mode='fan_in', nonlinearity='relu')
+        # nn.init.xavier_normal_(self.proj.weight)
         nn.init.zeros_(self.bias)
     
     def forward(self, input1, input2): # 1*d, l*d
@@ -179,10 +196,8 @@ class BiaffineAttention(nn.Module):
             root_tokens = self.root_representation.repeat(*repeat_shape)
             input2 = torch.cat((root_tokens, input2), dim=input2.dim() - 2)
 
-        input1 = self.layer_norm_input1(input1)
-        input2 = self.layer_norm_input2(input2)
-        input1 = self.f_1(input1) + input1 #1*d
-        input2 = self.f_2(input2) + input2 #l*d
+        input1 = self.f_1(input1)   #1*d
+        input2 = self.f_2(input2)   #l*d
 
         input1 = self.proj1(input1)
         input2 = self.proj2(input2)
@@ -352,11 +367,13 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 # print(w.shape)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
-            if attn_relpos is not None:
-                r2 = torch.arange(max_len, -1, -1.0, device=w.device).long()
+            if depth_embed is not None:
+                r2 = torch.arange(max_len - min_len, -1, -1.0, device=w.device).long()
                 depth_biases = depth_embed(r2)
-                Moderate_rk = self.r_net(depth_biases)
-                Moderate_rk = Moderate_rk.view(max_len + 1, self.n_head, self.d_head)
+                # Moderate_rk = self.r_net(depth_biases)
+                _, Moderate_wk, _ = torch.chunk(self.qkv_net(depth_biases), 3, dim=-1)
+                Moderate_wk = Moderate_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
+                # Moderate_rk = Moderate_rk.view(max_len - min_len + 1, self.n_head, self.d_head)
 
             w_head_q, w_head_k, w_head_v = torch.chunk(w_heads, 3, dim=-1)
             # _, w_head_k, _ = torch.chunk(w_graphlayer, 3, dim=-1)
@@ -407,19 +424,12 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             # attn_relpos = torch.zeros_like(attn_relpos)
             # attn_relpos = torch.arange(1, attn_relpos.shape[1] + 1).unsqueeze(0).repeat(attn_relpos.shape[0], attn_relpos.shape[2], 1).cuda()
             attn_relpos = attn_relpos.permute(1, 2, 0)
-            Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, Moderate_rk))
+            # Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, Moderate_rk))
+            Moderate_AC = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, Moderate_wk))
             attn_relpos = (max_len - attn_relpos).long()
-            BD = self._rel_shift(BD) + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+            # BD = self._rel_shift(BD) + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1])) + Moderate_AC.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+            BD = self._rel_shift(BD) + Moderate_AC.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
             # BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-
-            # WkD
-            # BD = self._rel_shift(BD)
-            # r_graph = self.qkv_net(r)
-            # _,r_w_graph,_ = torch.chunk(r_graph, 3, dim=-1)
-
-            # r_w_graph = r_w_graph.view(rlen, self.n_head, self.d_head)
-            # Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (w_head_q, r_w_graph))
-            # BD = BD + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
 
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
@@ -639,7 +649,7 @@ class TransformerGrammar(nn.Module):
                     #     sent_attn_relpos.append([0]*(length_i))
                     attn_relpos.append(sent_attn_relpos)
                     # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
-            elif rel_type == "depth":
+            elif rel_type == "depth" or rel_type == "rel_depth":
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
                     input_size = len(sent_index_to_id) - 1
                     id_to_index = {}
@@ -668,6 +678,8 @@ class TransformerGrammar(nn.Module):
                             continue
                         finished_word_idx = sent_index_to_id[i] - 1
                         depth = calculate_depth(graph[:sent_index_to_id[i], :sent_index_to_id[i]])
+                        if rel_type == "rel_depth":
+                            depth = [item - depth[finished_word_idx] for item in depth]
                         for id, depth_value in enumerate(depth[1:]):
                             sent_attn_relpos[i, id_to_index[id + 1]] = depth_value
                     # for j in range(length_i - len(sent_attn_relpos)):
@@ -690,11 +702,11 @@ class TransformerGrammar(nn.Module):
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
-                                graph[j][i + 1] = 1
+                                graph[j][i + 1] = 10
                                 graph[i + 1][j] = 1  #2
                         if right_sent_arrow[i]: #i -> j
                             for j in right_sent_arrow[i]:
-                                graph[i + 1][j] = 1
+                                graph[i + 1][j] = 10
                                 graph[j][i + 1] = 1  #2
 
                     for i in range(input_size):
@@ -918,11 +930,14 @@ class TransformerGrammar(nn.Module):
         word_emb = self.emb(inputs)     
         if use_mask == None or use_mask == 'txl' or use_mask == 'txl_arc' or use_mask == 'linear' or use_mask == "None" or use_mask == 'sdp_arc' or use_mask == 'graphlayer':
             pos_emb = self.pos_emb(torch.arange(seq_len-1, -1, -1.0, device=word_emb.device))
+            min_relative_length = 0
             if use_mask == 'graphlayer':
                 max_relative_length = 150
+                if rel_type == "rel_depth":
+                    max_relative_length = 75
+                    min_relative_length = -75
             else:
                 max_relative_length = seq_len - 1
-            min_relative_length = 0
         else:
             if max_relative_length is None:
                 max_relative_length = seq_len
@@ -981,6 +996,9 @@ class TransformerGrammar(nn.Module):
         # return word_loss
 
         if return_h:
+            if use_mask == "graphlayer":
+                return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1)
+                # return loss, hiddens[9] + hiddens[15]
             return loss, core_out
         else:
             return loss

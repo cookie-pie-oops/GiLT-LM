@@ -82,6 +82,11 @@ def log_arguments(args):
 def load_data(path, batchsize=-1, shuffle=False, seed=1111):
 
     with open(path, 'r') as f:
+        # sents = [line.strip() for line in f.readlines()][:1000]
+        
+        # sents = [line.strip() for line in f.readlines()]
+        # sents = sents[:len(sents)//4]
+        
         sents = [line.strip() for line in f.readlines()]
         sents = [sent.split(',') if len(sent)!=0 else [] for sent in sents]
         sents = [[int(word) for word in sent] if sent != [] else [] for sent in sents]

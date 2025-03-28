@@ -2,17 +2,16 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_5:4_distance_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.out
+#SBATCH --output=graphlayer_small_psd_4_degree_DTG_concat_smallerproj_AC_2.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 # Test: 1. SG-test; 2. SDP parser
 # To do list: important sampling
-# stage2 training / clip size / one layernorm for both input
 
 export DATASET=psd
 export DATASIZE=small
-export RELTYPE=distance
+export RELTYPE=degree
 export LOSSRATIO=0.8
 
 python train_graphLayer.py \
@@ -22,9 +21,9 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
     --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
     --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_concat_smallerproj_AC.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_sameembed_nomultiply_init_2ln_dynamic_temp2_largeMLP.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_concat_smallerproj_AC.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
