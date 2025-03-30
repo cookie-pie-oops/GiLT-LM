@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, Callable, List, Union, Tuple
 import logging
 # logger = get_logger()
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -675,7 +675,9 @@ class PushdownTransformerConstituency(nn.Module):
 
         if mems is not None:
             raise NotImplementedError("We ignore TXL mems for now.")
-        
+        # try transpose WITHIN the forward to let DataParallel be able to work
+        data = data.transpose(0, 1)
+        target = target.transpose(0, 1)
         qlen, bsz = data.size()
         mlen = 0 if mems is None else mems[0].size(0)
         klen = qlen + mlen

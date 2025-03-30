@@ -18,11 +18,14 @@ class ModelConfig:
     
 @dataclass
 class ParallelConfig:
-    parallel: str = "none" # "ddp" or "dp" or "none"
+    parallel: str = "dp" # "ddp" or "dp" or "none"
     local_rank: int = 0
     assert parallel in ["ddp", "dp", "none"], f"parallel must be one of ['ddp', 'dp', 'none'], but got {parallel}"
     if parallel == "ddp":
         raise NotImplementedError("ddp is not implemented yet")
+    # elif parallel == "dp":
+    #     # we have dim alignment bugs in dp
+    #     raise NotImplementedError("dp is not implemented yet")
 
 @dataclass
 class TrainConfig:

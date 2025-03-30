@@ -14,7 +14,7 @@ import wandb
 
 # level of log
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
@@ -233,8 +233,13 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             target = ids[:, 1:]
             data = ids[:, :-1]
             # transpose to [max_len, batch_size] to feed in the model...
-            data = data.transpose(0, 1) # [T, B]
-            target = target.transpose(0, 1)
+            
+            # FIXME:
+            # for dp, we should transpose these in the forward...
+            # data = data.transpose(0, 1) # [T, B]
+            # target = target.transpose(0, 1)
+            
+            
             # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
             
