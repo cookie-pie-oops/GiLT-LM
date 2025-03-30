@@ -18,7 +18,7 @@ class ModelConfig:
     
 @dataclass
 class ParallelConfig:
-    parallel: str = "dp" # "ddp" or "dp" or "none"
+    parallel: str = "none" # "ddp" or "dp" or "none"
     local_rank: int = 0
     assert parallel in ["ddp", "dp", "none"], f"parallel must be one of ['ddp', 'dp', 'none'], but got {parallel}"
     if parallel == "ddp":

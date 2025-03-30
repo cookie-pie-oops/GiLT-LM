@@ -19,8 +19,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 
-
-
 def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
     if parallel_args.parallel == 'ddp':
         raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
@@ -315,8 +313,6 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1)
                         target = ids[:, 1:]
                         data = ids[:, :-1]
-                        data = data.transpose(0, 1)
-                        target = target.transpose(0, 1)
                         stack_tape = batch["stack_tape"].to(device)
                         attachment_labels = batch["attachment_labels"].to(device)
                         # forward

@@ -21,3 +21,4 @@ data/
 *.log
 ckpt/
 wandb/
+*.tgz

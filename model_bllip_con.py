@@ -517,6 +517,8 @@ class AttachmentHead(nn.Module):
 
         # 计算 next_word 的 query 与 key
         # 拼接 [q, next_word]，假设 next_word 的最后一维与 embd_dim 相同
+        print(q.shape)
+        print(next_word.shape)
         cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*d_model)
         next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, 2*d_model)
         next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, 2*d_model)
@@ -678,6 +680,7 @@ class PushdownTransformerConstituency(nn.Module):
         # try transpose WITHIN the forward to let DataParallel be able to work
         data = data.transpose(0, 1)
         target = target.transpose(0, 1)
+        # print(data, target)
         qlen, bsz = data.size()
         mlen = 0 if mems is None else mems[0].size(0)
         klen = qlen + mlen
@@ -726,9 +729,12 @@ class PushdownTransformerConstituency(nn.Module):
         # mask the attach_logits with attachment_mask
         # print("ATTACH MASK", attachment_mask.shape)
         
-        logging.debug("ATTACH LABEL", attachment_labels.shape)
-        logging.debug("ATTACH LOGITS", attach_logits.shape)
-        logging.debug("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
+        logging.debug("ATTACH LABEL")
+        logging.debug(attachment_labels.shape)
+        logging.debug("ATTACH LOGITS")
+        logging.debug(attach_logits.shape)
+        logging.debug("SLICED 2D ATTACH LOGITS")
+        logging.debug(attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
         attach_logits = attach_logits.contiguous() # otherwise may cause error in view
         
@@ -743,7 +749,8 @@ class PushdownTransformerConstituency(nn.Module):
         # LOSS COMPUTATION
         logits = logits.contiguous()
         
-        logging.debug("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
+        logging.debug("SLICED 2D LOGITS")
+        logging.debug(logits[0, :, :].detach().cpu().numpy())
         loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id, reduction='sum')
         # loss = loss_words + loss_attach
         
