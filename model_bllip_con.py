@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional, Callable, List, Union, Tuple
 import logging
 # logger = get_logger()
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -517,8 +517,8 @@ class AttachmentHead(nn.Module):
 
         # 计算 next_word 的 query 与 key
         # 拼接 [q, next_word]，假设 next_word 的最后一维与 embd_dim 相同
-        print(q.shape)
-        print(next_word.shape)
+        # print(q.shape)
+        # print(next_word.shape)
         cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*d_model)
         next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, 2*d_model)
         next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, 2*d_model)

@@ -34,11 +34,11 @@ class TrainConfig:
     seed: int = 12345
     batch_size: int = 64
     num_workers: int = 8
-    epochs: int = 4 # debug: 110, normal: 4
+    epochs: int = 4 # debug: 50, normal: 4
     
     max_lr: float = 3e-4 # debug: 1e-2
     start_lr: float = 1e-7
-    warmup_steps: int = 8000 # debug: 100, normal: 8000
+    warmup_steps: int = 8000 # debug: 45, normal: 8000
     eta_min: float = 3e-7
     
     weight_decay: float = 0 # debug: 0.01, normal: 0
@@ -55,10 +55,10 @@ class TrainConfig:
     
     
     # DEBUG
-    run_name = "push_bllip_con_debug"
-    epochs: int = 110
-    start_lr: float = 1e-6
-    max_lr: float = 1e-4
-    warmup_steps: int = 100
-    log_interval: int = 1
-    eval_interval: int = 1
+    # run_name = "push_bllip_con_debug"
+    # epochs: int = 50
+    # start_lr: float = 1e-6
+    # max_lr: float = 1e-4
+    # warmup_steps: int = 45
+    # log_interval: int = 1
+    # eval_interval: int = 1

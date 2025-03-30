@@ -12,9 +12,8 @@ import torch.nn as nn
 import json
 import wandb
 
-# level of log
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
@@ -122,7 +121,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             torch.optim.lr_scheduler.LinearLR(optimizer, 
                                               start_factor=train_args.start_lr / train_args.max_lr,
                                               total_iters=train_args.warmup_steps),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_args.epochs * len(train_dataset) // train_args.batch_size,
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // train_args.batch_size, train_args.epochs),
                                                        eta_min=train_args.eta_min)
         ],
         milestones=[train_args.warmup_steps] # means the first scheduler will be used for warmup_steps, and the second one will be used for the rest
@@ -259,7 +258,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 stack_tape,
                 attachment_labels,
             ) # summed loss
-            logging.debug(loss_w, loss_a)
+            
             # if nan then raise
             if torch.isnan(loss_w).any() or torch.isnan(loss_a).any():
                 raise ValueError("Loss is NaN")
