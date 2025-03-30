@@ -1,25 +1,26 @@
 import unittest
 import torch
 import torch.nn.functional as F
-
+import torch.nn as nn
+import numpy as np
 from model_bllip_con import PushdownTransformerConstituency
 
 class TestPushdownTransformerConstituency(unittest.TestCase):
 
     def setUp(self):
         # 使用较小的参数进行测试，便于快速运行
-        self.vocab_size = 50
-        self.w_dim = 32
-        self.n_head = 4
-        self.d_head = 8
-        self.d_inner = 64
-        self.num_layers = 2  # 测试时使用较少层数
+        self.vocab_size = 32000
+        self.w_dim = 1024
+        self.n_head = 8
+        self.d_head = 128
+        self.d_inner = 4096
+        self.num_layers = 16  # 测试时使用较少层数
         self.dropout = 0.1
         self.dropoutatt = 0.1
         self.pad_id = 0
         self.bos_id = 1
         self.eos_id = 2
-        self.max_stack_depth = 10  # 测试时使用较小的堆栈深度上限
+        self.max_stack_depth = 200  # 测试时使用较小的堆栈深度上限
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = PushdownTransformerConstituency(
@@ -38,6 +39,33 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
             pre_lnorm=False,
             max_stack_depth=self.max_stack_depth
         ).to(self.device)
+        self.model.apply(self.weights_init)  # 初始化权重
+        
+    def weights_init(self, m):
+        classname = m.__class__.__name__
+        if classname.find('Linear') != -1:
+            if hasattr(m, 'weight'):
+                scale = 2.0 / self.num_layers
+                fan_in = nn.init._calculate_correct_fan(m.weight, 'fan_in')
+                nn.init.trunc_normal_(m.weight, 0.0, np.sqrt(scale / fan_in))
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias, 0.0)
+        elif classname.find('LayerNorm') != -1:
+            if hasattr(m, 'weight'):
+                nn.init.constant_(m.weight, 1.0)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias, 0.0)
+        elif classname.find('PushdownTransformerConstituency') != -1:
+            if hasattr(m, 'r_w_bias'):
+                fan_in = nn.init._calculate_correct_fan(m.r_w_bias, 'fan_in')
+                nn.init.trunc_normal_(m.r_w_bias, 0.0, np.sqrt(1.0 / fan_in))
+            if hasattr(m, 'r_r_bias'):
+                fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
+                nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
+        elif classname.find('Embedding') != -1:
+            if hasattr(m, 'weight'):
+                fan_in = nn.init._calculate_correct_fan(m.weight, 'fan_in')
+                nn.init.uniform_(m.weight, -np.sqrt(3.0 / fan_in), np.sqrt(3.0 / fan_in))
 
     def generate_dummy_inputs(self, T, B):
         """
@@ -89,7 +117,8 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
         """测试前向传播返回的损失为标量，并且不会报错。"""
         T, B = 7, 3
         data, target, stack_tape, attachment_labels = self.generate_dummy_inputs(T, B)
-        loss = self.model(data, target, stack_tape, attachment_labels)
+        loss1, loss2 = self.model(data, target, stack_tape, attachment_labels)
+        loss = loss1 + loss2
         print("LOSS: ", loss)
         # loss should be scalar
         self.assertTrue(loss.dim() == 0, "The loss must be scalar")
@@ -98,7 +127,8 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
         """测试 forward(return_h=True) 能返回 (loss, hidden)，并验证 hidden 的形状。"""
         T, B = 5, 2
         data, target, stack_tape, attachment_labels = self.generate_dummy_inputs(T, B)
-        loss, hidden = self.model(data, target, stack_tape, attachment_labels, return_h=True)
+        loss1, loss2, hidden = self.model(data, target, stack_tape, attachment_labels, return_h=True)
+        loss = loss1 + loss2
         self.assertTrue(loss.dim() == 0, "The loss must be scalar")
         # hidden should be [T, B, w_dim]
         self.assertEqual(hidden.shape, (T, B, self.w_dim), "Hidden Shape Mismatch")
@@ -107,8 +137,10 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
         """测试反向传播是否能正常进行（检查梯度是否能正常计算）。"""
         T, B = 6, 2
         data, target, stack_tape, attachment_labels = self.generate_dummy_inputs(T, B)
-        loss = self.model.forward(data, target, stack_tape, attachment_labels)
+        loss1, loss2 = self.model.forward(data, target, stack_tape, attachment_labels)
         # Test backward
+        loss = loss1 + loss2
+        self.model.zero_grad()
         loss.backward()
         # 随便检查模型中一个参数是否有梯度
         for name, param in self.model.named_parameters():

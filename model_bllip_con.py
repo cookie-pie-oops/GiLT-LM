@@ -10,8 +10,11 @@ import time
 # from helping_utils.logger import configure_logger, get_logger
 from dataclasses import dataclass
 from typing import Optional, Callable, List, Union, Tuple
+import logging
 # logger = get_logger()
-DEBUG = False
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
 
 
 class PositionalEmbedding(nn.Module): # also posemb for pushdown
@@ -51,9 +54,9 @@ class PositionwiseFF(nn.Module):
         # self.layer_norm = nn.Identity()
         self.pre_lnorm = pre_lnorm
         
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.CoreNet[0].weight)
-        nn.init.xavier_uniform_(self.CoreNet[3].weight)
+    # def init_weights(self):
+    #     nn.init.xavier_uniform_(self.CoreNet[0].weight)
+    #     nn.init.xavier_uniform_(self.CoreNet[3].weight)
 
     def forward(self, inp):
         if self.pre_lnorm:
@@ -95,9 +98,9 @@ class RelMultiHeadAttn(nn.Module):
 
         self.pre_lnorm = pre_lnorm
         
-    def init_weights(self):
-        nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
-        nn.init.normal_(self.o_net.weight, 0.0, 0.02)
+    # def init_weights(self):
+    #     nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
+    #     nn.init.normal_(self.o_net.weight, 0.0, 0.02)
     
     def _rel_shift(self, x, zero_triu=False):
         zero_pad = torch.zeros((x.size(0), 1, *x.size()[2:]),
@@ -121,9 +124,9 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
         # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
-    def init_weights(self):
-        nn.init.normal_(self.r_net.weight, 0.0, 0.02)
-        super().init_weights()
+    # def init_weights(self):
+    #     nn.init.normal_(self.r_net.weight, 0.0, 0.02)
+    #     super().init_weights()
         
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)
@@ -238,10 +241,10 @@ class PushdownMultiHeadAttn(nn.Module):
         
         self.r_net = nn.Linear(d_model, n_head * d_head, bias=False) # r_net for projecting sinuoidal positional embedding
 
-    def init_weights(self):
-        nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
-        nn.init.normal_(self.o_net.weight, 0.0, 0.02)
-        nn.init.normal_(self.r_net.weight, 0.0, 0.02)
+    # def init_weights(self):
+    #     nn.init.normal_(self.qkv_net[0].weight, 0.0, 0.02)
+    #     nn.init.normal_(self.o_net.weight, 0.0, 0.02)
+    #     nn.init.normal_(self.r_net.weight, 0.0, 0.02)
         
     def _rel_shift(self, x, zero_triu=False):
         zero_pad = torch.zeros((x.size(0), 1, *x.size()[2:]),
@@ -392,9 +395,9 @@ class RelPartialLearnableDecoderLayer(nn.Module):
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
         
-    def init_weights(self):
-        self.dec_attn.init_weights()
-        self.pos_ff.init_weights()
+    # def init_weights(self):
+    #     self.dec_attn.init_weights()
+    #     self.pos_ff.init_weights()
     
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         if cache:
@@ -421,9 +424,9 @@ class RelPartialLearnablePushdownLayer(RelPartialLearnableDecoderLayer):
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf,
                                      pre_lnorm=kwargs.get('pre_lnorm')) # the original paper seems not adding this??
         
-    def init_weights(self):
-        self.dec_attn.init_weights()
-        self.pos_ff.init_weights()
+    # def init_weights(self):
+    #     self.dec_attn.init_weights()
+    #     self.pos_ff.init_weights()
         
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, stack_tape, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
         if cache:
@@ -485,11 +488,23 @@ class AttachmentHead(nn.Module):
         # size of q/k/v is 2*d_model=D
         self.scale = 1 / ((2 * d_model) ** 0.5)
         
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.data_to_qk.weight)
-        nn.init.xavier_uniform_(self.q_next_word_mlp[0].weight)
-        nn.init.xavier_uniform_(self.k_next_word_mlp[0].weight)
-        nn.init.xavier_uniform_(self.key_and_stack_mlp[0].weight)
+    # def init_weights(self):
+    #     nn.init.kaiming_normal_(self.data_to_qk.weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.q_next_word_mlp[0].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.k_next_word_mlp[0].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.q_next_word_mlp[3].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.k_next_word_mlp[3].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.key_and_stack_mlp[0].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.kaiming_normal_(self.key_and_stack_mlp[3].weight, mode='fan_in', nonlinearity='relu')
+    #     nn.init.normal_(self.beta.weight, mean=0.0, std=0.02)
+    #     # bias -> 0
+    #     nn.init.zeros_(self.data_to_qk.bias)
+    #     nn.init.zeros_(self.q_next_word_mlp[0].bias)
+    #     nn.init.zeros_(self.k_next_word_mlp[0].bias)
+    #     nn.init.zeros_(self.q_next_word_mlp[3].bias)
+    #     nn.init.zeros_(self.k_next_word_mlp[3].bias)
+    #     nn.init.zeros_(self.key_and_stack_mlp[0].bias)
+    #     nn.init.zeros_(self.key_and_stack_mlp[3].bias)
 
     def forward(self, x, stack_tape, next_word):
         # next_word 是当前预测的 token，形状为 (B, T, embd_dim = d_model now)
@@ -517,6 +532,8 @@ class AttachmentHead(nn.Module):
         # 拼接 k 与深度信息，通过 MLP 得到融合后的 k 信息
         k_with_info = self.key_and_stack_mlp(
             torch.cat([k_exp, depth_emb], dim=-1)) # (B, T, T, D)
+        # logging.debug(k_with_info)
+        # exit()
         k_with_info = k_with_info * self.scale
 
         # 计算 attachment logits
@@ -624,17 +641,19 @@ class PushdownTransformerConstituency(nn.Module):
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.stack_pad_id = stack_pad_id
+        if self.num_layers > 5:
+            logging.warning("You have set num_layers >> 1, please init the weights of the model (by kaiming fan in). If you have applied weight init, please ignore this warning.")
         
-    def init_weights(self):
-        nn.init.normal_(self.r_w_bias, 0.0, 0.02)
-        nn.init.normal_(self.r_r_bias, 0.0, 0.02)
-        self.emb.weight.data.uniform_(-0.02, 0.02)
-        self.projection.weight = self.emb.weight
-        self.projection.bias.data.zero_()
-        self.attachment_head.init_weights()
-        for layer in self.layers:
-            layer.init_weights()
-        self.pushdown_final_layer.init_weights()
+    # def init_weights(self):
+    #     nn.init.normal_(self.r_w_bias, 0.0, 0.02)
+    #     nn.init.normal_(self.r_r_bias, 0.0, 0.02)
+    #     self.emb.weight.data.uniform_(-0.02, 0.02)
+    #     self.projection.weight = self.emb.weight
+    #     self.projection.bias.data.zero_()
+    #     self.attachment_head.init_weights()
+    #     for layer in self.layers:
+    #         layer.init_weights()
+    #     self.pushdown_final_layer.init_weights()
 
     def forward(self, 
                 data, 
@@ -704,15 +723,15 @@ class PushdownTransformerConstituency(nn.Module):
         
         # mask the attach_logits with attachment_mask
         # print("ATTACH MASK", attachment_mask.shape)
-        if DEBUG:
-            print("ATTACH LABEL", attachment_labels.shape)
-            print("ATTACH LOGITS", attach_logits.shape)
-            print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
+        
+        logging.debug("ATTACH LABEL", attachment_labels.shape)
+        logging.debug("ATTACH LOGITS", attach_logits.shape)
+        logging.debug("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
         attach_logits = attach_logits.contiguous() # otherwise may cause error in view
         
         # attachment_labels: [B, T] labels for attachment head, so qlen+1 here is the number of classes
-        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=self.stack_pad_id)
+        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=self.stack_pad_id, reduction='sum')
         
         # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
         # needs stack labels (idxs to reduce with) for each time step and do the reduce
@@ -721,13 +740,13 @@ class PushdownTransformerConstituency(nn.Module):
 
         # LOSS COMPUTATION
         logits = logits.contiguous()
-        if DEBUG:
-            print("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
-        loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id)
-        loss = loss_words + loss_attach # XXX: WEIGHTED???
+        
+        logging.debug("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
+        loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id, reduction='sum')
+        # loss = loss_words + loss_attach
         
         if return_h:
-            return loss, core_out
+            return loss_words, loss_attach, core_out
         else:
-            return loss
+            return loss_words, loss_attach
     

@@ -20,3 +20,4 @@ d.py
 data/
 *.log
 ckpt/
+wandb/

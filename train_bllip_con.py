@@ -8,14 +8,18 @@ import numpy as np
 import sentencepiece as spm
 from config import ModelConfig, TrainConfig, ParallelConfig
 import logging
+import torch.nn as nn
+import json
+import wandb
+
 # level of log
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 
-logging.basicConfig(level=logging.DEBUG)
+
 
 def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
     if parallel_args.parallel == 'ddp':
@@ -66,18 +70,49 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         max_stack_depth=model_args.max_stack_depth
     ).to(device)
     
-    # Distribute the model
+    # model numel norm
+    num_params = sum(p.numel() for p in model.parameters())
+    logging.info(f"Model has {num_params / 1e6:.2f}M parameters")
+    # model size
+    model_size = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
+    logging.info(f"Model size: {model_size:.2f}MB")
+    
+    def weights_init(m):
+        classname = m.__class__.__name__
+        if classname.find('Linear') != -1:
+            if hasattr(m, 'weight'):
+                scale = 2.0 / model_args.num_layers
+                fan_in = nn.init._calculate_correct_fan(m.weight, 'fan_in')
+                nn.init.trunc_normal_(m.weight, 0.0, np.sqrt(scale / fan_in))
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias, 0.0)
+        elif classname.find('LayerNorm') != -1:
+            if hasattr(m, 'weight'):
+                nn.init.constant_(m.weight, 1.0)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias, 0.0)
+        elif classname.find('PushdownTransformerConstituency') != -1:
+            if hasattr(m, 'r_w_bias'):
+                fan_in = nn.init._calculate_correct_fan(m.r_w_bias, 'fan_in')
+                nn.init.trunc_normal_(m.r_w_bias, 0.0, np.sqrt(1.0 / fan_in))
+            if hasattr(m, 'r_r_bias'):
+                fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
+                nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
+        elif classname.find('Embedding') != -1:
+            if hasattr(m, 'weight'):
+                fan_in = nn.init._calculate_correct_fan(m.weight, 'fan_in')
+                nn.init.uniform_(m.weight, -np.sqrt(3.0 / fan_in), np.sqrt(3.0 / fan_in))
+                
+    model.apply(weights_init) # FIXME: Maybe we don't need depth embedding. Watch the final PPL and adjust.
 
     if parallel_args.parallel == 'dp':
         model = torch.nn.DataParallel(model)
-    # else:
-    #     pass
     
     # 2. load optimizer
     # 2.1 optimizer
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=train_args.lr,
+        lr=train_args.max_lr,
         weight_decay=train_args.weight_decay,
     )
     # 2.2 scheduler
@@ -86,10 +121,13 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
         [
-            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=train_args.warmup_steps),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_args.epochs * len(train_dataset) // train_args.batch_size)
+            torch.optim.lr_scheduler.LinearLR(optimizer, 
+                                              start_factor=train_args.start_lr / train_args.max_lr,
+                                              total_iters=train_args.warmup_steps),
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_args.epochs * len(train_dataset) // train_args.batch_size,
+                                                       eta_min=train_args.eta_min)
         ],
-        milestones=[train_args.warmup_steps]
+        milestones=[train_args.warmup_steps] # means the first scheduler will be used for warmup_steps, and the second one will be used for the rest
     )
     # 3. train
     # 3.1 set model to train mode
@@ -184,6 +222,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         
     # 3.3 training loop
     best_eval_loss = float("inf")
+    optimizer.zero_grad()
     for epoch in range(train_args.epochs):
         for step, batch in enumerate(train_dataloader):
             general_step = epoch * len(train_dataloader) + step
@@ -211,16 +250,23 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             logging.debug(f"attachment_labels shape: {attachment_labels.shape}")
             # 3.3.2 forward
             
-            loss = model.forward(
+            loss_w, loss_a = model.forward(
                 data,
                 target,
                 stack_tape,
                 attachment_labels,
-            )
+            ) # summed loss
+            logging.debug(loss_w, loss_a)
+            # if nan then raise
+            if torch.isnan(loss_w).any() or torch.isnan(loss_a).any():
+                raise ValueError("Loss is NaN")
+            
+            loss = (loss_w + train_args.attachment_ratio * loss_a) / (1 + train_args.attachment_ratio)
             
             # 3.3.3 backward
             loss = loss / train_args.gradient_accumulation_steps
-            loss.backward()
+            loss.backward() # NOTE: WE DON'T NEED TO DIVIDE BY SUM OF LENGTHS IN BACKWARD otherwise the scale <<1
+            
             
             # 3.3.4 clip grad norm
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_args.max_grad_norm)
@@ -233,14 +279,22 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 
             # print
             if (general_step + 1) % train_args.log_interval == 0:
+                sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
                 logging.info("=" * 100)
-                logging.info(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}, Global Step (+1): {general_step + 1}, LR: {scheduler.get_last_lr()[0]}")
-            
-            # # save model
-            # if step % train_args.save_interval == 0:
-            #     os.makedirs(f"./ckpt/{train_args.run_name}", exist_ok=True)
-            #     torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/model_epoch_{epoch}_step_{step}.pt")
-            
+                logging.info(f"Epoch: {epoch}, Step: {step}, Global Step (+1): {general_step + 1},")
+                # Loss Sum: {loss.item()}, Loss Word: {loss_w.item()}, Loss Attachment: {loss_a.item()},
+                logging.info(f"Loss Word for PPL: {loss_w.item() / sum_of_seq_lengths_item}, Loss Attachment for PPL: {loss_a.item() / sum_of_seq_lengths_item}")
+                logging.info(f"Loss for PPL: {loss.item() / sum_of_seq_lengths_item}, LR: {scheduler.get_last_lr()[0]}")
+                logging.info(f"PPL this time: {torch.exp(torch.tensor(loss.item() / sum_of_seq_lengths_item))}")
+                wandb.log({
+                    "train_loss": loss.item() / sum_of_seq_lengths_item,
+                    "train_loss_word": loss_w.item() / sum_of_seq_lengths_item,
+                    "train_loss_attachment": loss_a.item() / sum_of_seq_lengths_item,
+                    "train_ppl": torch.exp(torch.tensor(loss.item() / sum_of_seq_lengths_item)).item(),
+                    "epoch": epoch,
+                    "step": step,
+                    "global_step": general_step + 1,
+                })
             # eval w/ dev set
             # if best then save
             if (general_step + 1) % train_args.eval_interval == 0:
@@ -248,7 +302,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 logging.info(f"Eval at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
                 with torch.no_grad():
                     model.eval()
-                    eval_losses = []
+                    eval_losses_w = []
+                    eval_losses_a = []
+                    n_words = 0
                     for step, batch in enumerate(dev_dataloader):
                         ids = batch["ids"].to(device)
                         ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1)
@@ -259,22 +315,62 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         stack_tape = batch["stack_tape"].to(device)
                         attachment_labels = batch["attachment_labels"].to(device)
                         # forward
-                        loss = model.forward(
+                        loss_w, loss_a = model.forward(
                             data,
                             target,
                             stack_tape,
                             attachment_labels,
                         )
-                        eval_losses.append(loss.item())
-                    eval_loss = np.mean(eval_losses)
-                    logging.info(f"Eval Loss: {eval_loss}")
+        
+                        eval_losses_w.append(loss_w.item())
+                        eval_losses_a.append(loss_a.item())
+                        n_words += torch.sum(batch["lengths"]).item()
+                    eval_loss_w_sum = np.sum(eval_losses_w)
+                    eval_loss_a_sum = np.sum(eval_losses_a)
+                    # sum_of_all_seq_lengths = np.sum([torch.sum(batch["lengths"]).item() for batch in dev_dataloader])
+                    # assert sum_of_all_seq_lengths == n_words, f"sum_of_all_seq_lengths: {sum_of_all_seq_lengths}, n_words: {n_words}"
+                    eval_loss_w = eval_loss_w_sum / n_words
+                    eval_loss_a = eval_loss_a_sum / n_words
+                    eval_loss = eval_loss_w + eval_loss_a
+                    word_ppl = torch.exp(torch.tensor(eval_loss_w))
+                    all_ppl = torch.exp(torch.tensor(eval_loss))
+                    logging.info(f"Eval Loss: {eval_loss}, Word PPL: {word_ppl.item()}, All PPL: {all_ppl.item()}")
                     # save best model
                     if eval_loss < best_eval_loss:
+                        logging.info(f"Old best eval loss: {best_eval_loss}, new best eval loss: {eval_loss}")
                         best_eval_loss = eval_loss
-                        os.makedirs(f"./ckpt/{train_args.run_name}/best_{general_step+1}", exist_ok=True)
-                        torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best_{general_step+1}/model.pt")
+                        os.makedirs(f"./ckpt/{train_args.run_name}/best", exist_ok=True)
+                        # del old model.pt
+                        if os.path.exists(f"./ckpt/{train_args.run_name}/best/model.pt"):
+                            os.remove(f"./ckpt/{train_args.run_name}/best/model.pt")
+                        torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best/model.pt")
+                        # write a file about best eval loss and step (json)
+                        with open(f"./ckpt/{train_args.run_name}/best/best_eval.json", "w") as f:
+                            ddict = {
+                                "best_eval_loss": best_eval_loss,
+                                "best_eval_word_loss": eval_loss_w,
+                                "best_eval_attachment_loss": eval_loss_a,
+                                "best_eval_ppl": all_ppl.item(),
+                                "best_eval_word_ppl": word_ppl.item(),
+                                "epoch": epoch,
+                                "step": step,
+                                "global_step": general_step + 1,
+                            }
+                            json.dump(ddict, f)
                         logging.info(f"Best model saved at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
                     model.train()
+                    wandb.log({
+                        "eval_loss": eval_loss,
+                        "eval_loss_word": eval_loss_w,
+                        "eval_loss_attachment": eval_loss_a,
+                        "eval_ppl": all_ppl.item(),
+                        "eval_word_ppl": word_ppl.item(),
+                        "best_eval_loss": best_eval_loss,
+                        "best_ppl": torch.exp(torch.tensor(best_eval_loss)).item(),
+                        "epoch": epoch,
+                        "step": step,
+                        "global_step": general_step + 1,
+                    })
                 # logging.info("=" * 100)
                 
         
@@ -286,6 +382,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         # logging.info("=" * 100)
 
     logging.info("=" * 100)
+    # wandb
+    wandb.finish()
+    
 def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig, rank: int, world_size: int):
     raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
     # 0. load datasets
@@ -321,5 +420,18 @@ if __name__ == '__main__':
     print("=" * 100)
     # exit()
     
+    # do wandb
+    wandb.init(
+        project="push_bllip_con",
+        name=train_args.run_name,
+        config={
+            "model_args": asdict(model_args),
+            "train_args": asdict(train_args),
+            "parallel_args": asdict(parallel_args),
+        },
+    )
+    wandb.run.name = train_args.run_name
+    wandb.run.save() # save model_args, train_args, parallel_args
     # main
+    # log things in main
     main(model_args, train_args, parallel_args)
