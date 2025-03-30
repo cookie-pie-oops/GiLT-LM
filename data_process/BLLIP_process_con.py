@@ -22,9 +22,8 @@ def _list_create(doc_path, early_stopping=-1):  # -1 for no limit
         year_dir = os.path.join(doc_path, year)
         if not os.path.isdir(year_dir):
             continue
-        print(f"Processing year: {year}")
         # 遍历每个子目录（dir_index）
-        for sub_dir in tqdm(os.listdir(year_dir)):
+        for sub_dir in tqdm(os.listdir(year_dir), desc=f"Processing year {year}"):
             sub_dir_path = os.path.join(year_dir, sub_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
@@ -60,13 +59,27 @@ def parse_and_split(doc_path, sp, dev_num=50000, test_num=100000, early_stopping
     # split to train,dev,test
     # shuffle
     import random
+    # seed
+    random.seed(12345)
     random.shuffle(original_list)
     # split
     train_ori = original_list[dev_num + test_num:]
     dev_ori = original_list[:dev_num]
     test_ori = original_list[dev_num:dev_num + test_num]
+    
+    def fix_empty_labels(t):
+        if isinstance(t, str):
+            return t
+        # t is a tree
+        if not t.label().strip():
+            t.set_label("<unk>")
+        # empty children
+        for child in t:
+            fix_empty_labels(child)
+        return t
 
     def parse_sentences(ori_data):
+        discarded = 0
         in_sentences = []
         parses = []
         for sent in tqdm(ori_data, desc="Parsing sentences"):
@@ -79,11 +92,22 @@ def parse_and_split(doc_path, sp, dev_num=50000, test_num=100000, early_stopping
                     raise e
             else:
                 tree = sent
+            
+            
+            # 如果转换后的 tree 仍不是 Tree（理论上不应该出现），则调用 binarize_tree
+            tree = fix_empty_labels(tree)
+            try:
+                tree.collapse_unary()
+            except:
+                # print("Error: ", tree)
+                # raise e
+                discarded += 1
+                continue
+            tree.chomsky_normal_form()
             # flatten 处理：将树平铺为一个句子序列，并添加句末符（EOS）
             in_sentences.append(flatten(tree, add_eos=True))
-            # 如果转换后的 tree 仍不是 Tree（理论上不应该出现），则调用 binarize_tree
-            tree.chomsky_normal_form()
-            tree.collapse_unary()
+                
+            
             if not isinstance(tree, Tree):
                 parses.append(
                     post_process_op(binarize_tree(tree), sp) # FIXED?: SUBWORD TOKENIZATION
@@ -153,15 +177,17 @@ def make_dataset(
 
 
 if __name__ == '__main__':
+    DEBUG = False
+    
     # you should cd data_process and then run this script
     doc_path = "../Dataset/bliip_87_89_wsj/"
     sp=spm.SentencePieceProcessor()
     sp.Load("./spm_parsing/BLLIP_spm.model")
     # debug:
-    train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1, 1, early_stopping=3)
-
-    # full:
-    # train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, 50000, 100000)
+    if DEBUG:
+        train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1, 1, early_stopping=3)
+    else:
+        train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 50000, 100000)
     train_data = make_dataset(train_in_sentences, train_parses, sp, split="train")
     print('=' * 100)
     dev_data = make_dataset(dev_in_sentences, dev_parses, sp, split="dev")
