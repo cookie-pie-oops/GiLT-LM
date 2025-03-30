@@ -444,7 +444,7 @@ class AttachmentHead(nn.Module):
 
     输入：
       - x: (B, T, n_embd) 隐藏状态序列
-      - stack_tape: (B, T) 的堆栈深度（整数张量）
+      - stack_tape: (B, T, T) 的堆栈深度（整数张量）
       - next_word: (B, T, embd_dim) 表示当前新预测的 token（经过 MLP 得到的向量）
     输出：
       - 返回形状为 (B, T, T+1) 的 attachment logits（经过因果 mask 后）
@@ -578,6 +578,7 @@ class PushdownTransformerConstituency(nn.Module):
                  pad_id = 0,
                  bos_id = 1,
                  eos_id = 2,
+                 stack_pad_id = -100,
                  pre_lnorm = False,
                  max_stack_depth = 200
                  ):
@@ -621,6 +622,7 @@ class PushdownTransformerConstituency(nn.Module):
         self.pad_id = pad_id
         self.bos_id = bos_id
         self.eos_id = eos_id
+        self.stack_pad_id = stack_pad_id
         
     def init_weights(self):
         nn.init.normal_(self.r_w_bias, 0.0, 0.02)
@@ -706,7 +708,9 @@ class PushdownTransformerConstituency(nn.Module):
         print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
         attach_logits = attach_logits.contiguous() # otherwise may cause error in view
-        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=-100)
+        
+        # attachment_labels: [B, T] labels for attachment head, so qlen+1 here is the number of classes
+        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=self.stack_pad_id)
         
         # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
         # needs stack labels (idxs to reduce with) for each time step and do the reduce

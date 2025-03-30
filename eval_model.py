@@ -9,8 +9,8 @@ import logging
 import time, math
 import json
 from torch import cuda
-from helping_utils.logger import configure_logger, get_logger
-from model_bllip_dep import PushdownTransformerConstituency
+# from helping_utils.logger import configure_logger, get_logger
+from model_bllip_con import PushdownTransformerConstituency
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_file', default='data/train_LG_bllip_action.csv', type=str)

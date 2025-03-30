@@ -1,0 +1,298 @@
+from datasets import Dataset as HFDataset
+import argparse
+import os
+import random
+from model_bllip_con import PushdownTransformerConstituency
+import torch
+import numpy as np
+import sentencepiece as spm
+from config import ModelConfig, TrainConfig, ParallelConfig
+import logging
+# level of log
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+# logging.basicConfig(level=logging.DEBUG)
+
+def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
+    if parallel_args.parallel == 'ddp':
+        raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
+    # 0. load datasets
+    train_dataset = HFDataset.load_from_disk(
+        "./data/BLLIP_LG_train"
+    )
+    dev_dataset = HFDataset.load_from_disk(
+        "./data/BLLIP_LG_dev"
+    )
+    # test_dataset = HFDataset.load_from_disk(
+    #     "./data/BLLIP_LG_test"
+    # )
+    
+    # 1. load model
+    # 1.1 set seed
+    random.seed(train_args.seed)
+    os.environ["PYTHONHASHSEED"] = str(train_args.seed)
+    np.random.seed(train_args.seed)
+    torch.manual_seed(train_args.seed)
+    torch.cuda.manual_seed_all(train_args.seed)
+    # torch.backends.cudnn.deterministic = True
+    
+    # 1.2 set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 1.3 spm tokenizer
+    sp = spm.SentencePieceProcessor()
+    sp.Load("./data_process/spm_parsing/BLLIP_spm.model")
+    
+    vocab_size = sp.GetPieceSize()
+    
+    model = PushdownTransformerConstituency(
+        vocab_size=vocab_size,
+        w_dim=model_args.w_dim,
+        n_head=model_args.n_head,
+        d_head=model_args.d_head,
+        d_inner=model_args.d_inner,
+        num_layers=model_args.num_layers,
+        dropout=model_args.dropout,
+        dropoutatt=model_args.dropoutatt,
+        pad_id=model_args.pad_id,
+        bos_id=model_args.bos_id,
+        eos_id=model_args.eos_id,
+        stack_pad_id=model_args.stack_pad_id,
+        pre_lnorm=model_args.pre_lnorm,
+        max_stack_depth=model_args.max_stack_depth
+    ).to(device)
+    
+    # Distribute the model
+
+    if parallel_args.parallel == 'dp':
+        model = torch.nn.DataParallel(model)
+    # else:
+    #     pass
+    
+    # 2. load optimizer
+    # 2.1 optimizer
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=train_args.lr,
+        weight_decay=train_args.weight_decay,
+    )
+    # 2.2 scheduler
+    # warmup + cosine annealing
+    total_steps = len(train_dataset) * train_args.epochs // train_args.batch_size
+    warmup_steps = train_args.warmup_steps
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # 3. train
+    # 3.1 set model to train mode
+    model.train()
+    
+    # 3.2 dataloader
+    def collate_fn(batch):
+        # find max len
+        max_len = max(len(item["ids"]) for item in batch)
+        
+        padded_ids = []
+        padded_stack_tape = []
+        padded_attachment_labels = []
+        lengths = []
+        idxs = []
+        
+        pad_id = model_args.pad_id  # pad_id: 0 for spm vocab
+        pad_value_stack = model_args.max_stack_depth - 1  # stack_tape 的 pad 值: max_depth - 1 (-100 will cause index error, and ?0 has been occupied?)
+        pad_value_att = model_args.stack_pad_id    # attachment_labels 的 pad 值: -100 (0 has been occupied)
+        
+        # for item in batch:
+        #     T = len(item["ids"])
+        #     lengths.append(T)
+        #     idxs.append(item.get("idx", 0))
+            
+        #     # 对 ids 进行 padding 到 max_len
+        #     padded_ids.append(item["ids"] + [pad_id] * (max_len - T))
+            
+        #     # 对 stack_tape 进行 padding：原始是 T x T，需要 pad 到 max_len x max_len
+        #     # 先初始化一个 max_len x max_len 的矩阵，用 pad_value_stack 填充
+        #     padded_matrix = [[pad_value_stack] * max_len for _ in range(max_len)]
+        #     for i in range(T):
+        #         for j in range(T):
+        #             padded_matrix[i][j] = item["stack_tape"][i][j]
+        #     padded_stack_tape.append(padded_matrix)
+            
+        #     # 对 attachment_labels 进行 padding 到 max_len
+        #     padded_attachment_labels.append(item["attachment_labels"] + [pad_value_att] * (max_len - T))
+        
+        for item in batch:
+            T = len(item["ids"])
+            lengths.append(T)
+            idxs.append(item.get("idx", 0))
+            
+            # ids padding -> max_len
+            padded_ids.append(item["ids"] + [pad_id] * (max_len - T))
+            
+            # pad stack_tape using tensor operations
+            stack_tensor = torch.tensor(item["stack_tape"], dtype=torch.long)
+            # full matrix with pad_value_stack
+            padded_tensor = torch.full((max_len, max_len), pad_value_stack, dtype=torch.long)
+            # fill the upper left corner with stack_tensor
+            padded_tensor[:T, :T] = stack_tensor
+            padded_stack_tape.append(padded_tensor)
+            
+            # attachment_labels 的 padding
+            padded_attachment_labels.append(item["attachment_labels"] + [pad_value_att] * (max_len - T))
+    
+        
+        # to tensor
+        batch_ids = torch.tensor(padded_ids, dtype=torch.long) # shape: [batch_size, max_len]
+        batch_lengths = torch.tensor(lengths, dtype=torch.long) # shape: [batch_size]
+        batch_stack_tape = torch.tensor(padded_stack_tape, dtype=torch.long) # shape: [batch_size, max_len, max_len]
+        batch_attachment_labels = torch.tensor(padded_attachment_labels, dtype=torch.long) # shape: [batch_size, max_len]
+        batch_idxs = torch.tensor(idxs, dtype=torch.long) # shape: [batch_size]
+        
+        return {
+            "ids": batch_ids,
+            "lengths": batch_lengths,
+            "idxs": batch_idxs,
+            "stack_tape": batch_stack_tape,
+            "attachment_labels": batch_attachment_labels
+        }
+        
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=train_args.batch_size,
+        shuffle=True,
+        num_workers=train_args.num_workers,
+        collate_fn=collate_fn,
+    )
+    
+    dev_dataloader = torch.utils.data.DataLoader(
+        dev_dataset,
+        batch_size=train_args.batch_size,
+        shuffle=False,
+        num_workers=train_args.num_workers,
+        collate_fn=collate_fn,
+    )
+        
+    # 3.3 training loop
+    best_eval_loss = float("inf")
+    for epoch in range(train_args.epochs):
+        for step, batch in enumerate(train_dataloader):
+            general_step = epoch * len(train_dataloader) + step
+            # 3.3.1 get data
+            ids = batch["ids"].to(device) # [B, T]
+            # cat bos before ids, where bos is model_args.bos_id
+            ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1) # [B, T+1]
+            target = ids[:, 1:]
+            data = ids[:, :-1]
+            
+            stack_tape = batch["stack_tape"].to(device) # [B, T, T]
+            
+            attachment_labels = batch["attachment_labels"].to(device) # [B, T]
+            
+            # 3.3.2 forward
+            
+            loss = model.forward(
+                data,
+                target,
+                stack_tape,
+                attachment_labels,
+            )
+            
+            # 3.3.3 backward
+            loss = loss / train_args.gradient_accumulation_steps
+            loss.backward()
+            
+            # 3.3.4 clip grad norm
+            torch.nn.utils.clip_grad_norm_(model.parameters(), train_args.max_grad_norm)
+            
+            # 3.3.5 step
+            if (general_step + 1) % train_args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                
+            # print
+            if (general_step + 1) % train_args.log_interval == 0:
+                logging.info(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}, Global Step (+1): {general_step + 1}, LR: {scheduler.get_last_lr()[0]}")
+            
+            # # save model
+            # if step % train_args.save_interval == 0:
+            #     os.makedirs(f"./ckpt/{train_args.run_name}", exist_ok=True)
+            #     torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/model_epoch_{epoch}_step_{step}.pt")
+            
+            # eval w/ dev set
+            # if best then save
+            if (general_step + 1) % train_args.eval_interval == 0:
+                logging.info("=" * 100)
+                logging.info(f"Eval at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
+                with torch.no_grad():
+                    model.eval()
+                    eval_losses = []
+                    for step, batch in enumerate(dev_dataloader):
+                        ids = batch["ids"].to(device)
+                        ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1)
+                        target = ids[:, 1:]
+                        data = ids[:, :-1]
+                        stack_tape = batch["stack_tape"].to(device)
+                        attachment_labels = batch["attachment_labels"].to(device)
+                        # forward
+                        loss = model.forward(
+                            data,
+                            target,
+                            stack_tape,
+                            attachment_labels,
+                        )
+                        eval_losses.append(loss.item())
+                    eval_loss = np.mean(eval_losses)
+                    logging.info(f"Eval Loss: {eval_loss}")
+                    # save best model
+                    if eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        os.makedirs(f"./ckpt/{train_args.run_name}/best_{general_step+1}", exist_ok=True)
+                        torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best_{general_step+1}/model.pt")
+                        logging.info(f"Best model saved at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
+                    model.train()
+                logging.info("=" * 100)
+                
+        
+        # save model
+        logging.info("=" * 100)
+        logging.info(f"Saving model at Epoch: {epoch}")
+        os.makedirs(f"./ckpt/{train_args.run_name}/epoch_{epoch}", exist_ok=True)
+        torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/epoch_{epoch}/model.pt")
+        logging.info("=" * 100)
+
+
+def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig, rank: int, world_size: int):
+    raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
+    # 0. load datasets
+    train_dataset = HFDataset.load_from_disk(
+        "./data/BLLIP_LG_train"
+    )
+    dev_dataset = HFDataset.load_from_disk(
+        "./data/BLLIP_LG_dev"
+    )
+    
+    random.seed(train_args.seed)
+    os.environ["PYTHONHASHSEED"] = str(train_args.seed)
+    np.random.seed(train_args.seed)
+    torch.manual_seed(train_args.seed)
+    torch.cuda.manual_seed_all(train_args.seed)
+    # wait
+
+
+if __name__ == '__main__':
+    model_args, train_args, parallel_args = ModelConfig(), TrainConfig(), ParallelConfig() # adjust by editing py
+    # print args
+    print(model_args)
+    print(train_args)
+    print(parallel_args)
+    # main
+    main(model_args, train_args, parallel_args)

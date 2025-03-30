@@ -2,7 +2,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from model_bllip_dep import PushdownTransformerConstituency
+from model_bllip_con import PushdownTransformerConstituency
 
 class TestPushdownTransformerConstituency(unittest.TestCase):
 
@@ -34,6 +34,7 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
             pad_id=self.pad_id,
             bos_id=self.bos_id,
             eos_id=self.eos_id,
+            stack_pad_id=-100,
             pre_lnorm=False,
             max_stack_depth=self.max_stack_depth
         ).to(self.device)

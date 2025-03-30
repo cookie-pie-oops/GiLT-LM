@@ -1,8 +1,9 @@
 *.out
-*.txt
+# *.txt
 /models
 /logs
-/Dataset
+*/Dataset
+Dataset/
 /data_process/parser
 /data_process/spm
 /data_process/spm_parsing
@@ -14,3 +15,7 @@
 /data_scripts
 */__pycache__
 __pycache__
+p.py
+d.py
+data/
+*.log
