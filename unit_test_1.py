@@ -74,6 +74,15 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
         attachment_labels = attachment_labels.to(self.device)
         # attachment_mask = attachment_mask.to(self.device)
         
+        # print every shape
+        print(f"batch size: {B}")
+        print(f"length: {T}")
+        print(f"data shape: {data.shape}")
+        print(f"target shape: {target.shape}")
+        print(f"stack_tape shape: {stack_tape.shape}")
+        print(f"attachment_labels shape: {attachment_labels.shape}")
+        # print(f"attachment_mask shape: {attachment_mask.shape}") 
+        
         return data, target, stack_tape, attachment_labels
 
     def test_forward_loss(self):

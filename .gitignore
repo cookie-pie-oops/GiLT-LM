@@ -19,3 +19,4 @@ p.py
 d.py
 data/
 *.log
+ckpt/

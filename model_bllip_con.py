@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Callable, List, Union, Tuple
 # logger = get_logger()
+DEBUG = False
 
 
 class PositionalEmbedding(nn.Module): # also posemb for pushdown
@@ -703,9 +704,10 @@ class PushdownTransformerConstituency(nn.Module):
         
         # mask the attach_logits with attachment_mask
         # print("ATTACH MASK", attachment_mask.shape)
-        print("ATTACH LABEL", attachment_labels.shape)
-        print("ATTACH LOGITS", attach_logits.shape)
-        print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
+        if DEBUG:
+            print("ATTACH LABEL", attachment_labels.shape)
+            print("ATTACH LOGITS", attach_logits.shape)
+            print("SLICED 2D ATTACH LOGITS \n", attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
         attach_logits = attach_logits.contiguous() # otherwise may cause error in view
         
@@ -719,7 +721,8 @@ class PushdownTransformerConstituency(nn.Module):
 
         # LOSS COMPUTATION
         logits = logits.contiguous()
-        print("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
+        if DEBUG:
+            print("SLICED 2D LOGITS \n", logits[0, :, :].detach().cpu().numpy())
         loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id)
         loss = loss_words + loss_attach # XXX: WEIGHTED???
         

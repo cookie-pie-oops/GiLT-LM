@@ -10,11 +10,12 @@ from config import ModelConfig, TrainConfig, ParallelConfig
 import logging
 # level of log
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
-# logging.basicConfig(level=logging.DEBUG)
+
+logging.basicConfig(level=logging.DEBUG)
 
 def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
     if parallel_args.parallel == 'ddp':
@@ -81,16 +82,15 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
     )
     # 2.2 scheduler
     # warmup + cosine annealing
-    total_steps = len(train_dataset) * train_args.epochs // train_args.batch_size
-    warmup_steps = train_args.warmup_steps
-
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            return float(current_step) / float(max(1, warmup_steps))
-        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-        return 0.5 * (1.0 + np.cos(np.pi * progress))
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # use sequentialLR
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        [
+            torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=train_args.warmup_steps),
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_args.epochs * len(train_dataset) // train_args.batch_size)
+        ],
+        milestones=[train_args.warmup_steps]
+    )
     # 3. train
     # 3.1 set model to train mode
     model.train()
@@ -143,7 +143,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             padded_tensor = torch.full((max_len, max_len), pad_value_stack, dtype=torch.long)
             # fill the upper left corner with stack_tensor
             padded_tensor[:T, :T] = stack_tensor
-            padded_stack_tape.append(padded_tensor)
+            padded_stack_tape.append(padded_tensor) # so padded_stack_tape is a list of tensors
             
             # attachment_labels 的 padding
             padded_attachment_labels.append(item["attachment_labels"] + [pad_value_att] * (max_len - T))
@@ -151,8 +151,10 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         
         # to tensor
         batch_ids = torch.tensor(padded_ids, dtype=torch.long) # shape: [batch_size, max_len]
+        
         batch_lengths = torch.tensor(lengths, dtype=torch.long) # shape: [batch_size]
-        batch_stack_tape = torch.tensor(padded_stack_tape, dtype=torch.long) # shape: [batch_size, max_len, max_len]
+        # batch_stack_tape = torch.tensor(padded_stack_tape, dtype=torch.long) # shape: [batch_size, max_len, max_len]
+        batch_stack_tape = torch.stack(padded_stack_tape, dim=0) # shape: [batch_size, max_len, max_len]
         batch_attachment_labels = torch.tensor(padded_attachment_labels, dtype=torch.long) # shape: [batch_size, max_len]
         batch_idxs = torch.tensor(idxs, dtype=torch.long) # shape: [batch_size]
         
@@ -191,11 +193,22 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1) # [B, T+1]
             target = ids[:, 1:]
             data = ids[:, :-1]
-            
+            # transpose to [max_len, batch_size] to feed in the model...
+            data = data.transpose(0, 1) # [T, B]
+            target = target.transpose(0, 1)
+            # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
             
             attachment_labels = batch["attachment_labels"].to(device) # [B, T]
             
+            # print shapes
+            
+            logging.debug(f"batch size: {ids.shape[0]}")
+            logging.debug(f"length: {ids.shape[1]}")
+            logging.debug(f"data shape: {data.shape}")
+            logging.debug(f"target shape: {target.shape}")
+            logging.debug(f"stack_tape shape: {stack_tape.shape}")
+            logging.debug(f"attachment_labels shape: {attachment_labels.shape}")
             # 3.3.2 forward
             
             loss = model.forward(
@@ -220,6 +233,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 
             # print
             if (general_step + 1) % train_args.log_interval == 0:
+                logging.info("=" * 100)
                 logging.info(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}, Global Step (+1): {general_step + 1}, LR: {scheduler.get_last_lr()[0]}")
             
             # # save model
@@ -240,6 +254,8 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1)
                         target = ids[:, 1:]
                         data = ids[:, :-1]
+                        data = data.transpose(0, 1)
+                        target = target.transpose(0, 1)
                         stack_tape = batch["stack_tape"].to(device)
                         attachment_labels = batch["attachment_labels"].to(device)
                         # forward
@@ -259,7 +275,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best_{general_step+1}/model.pt")
                         logging.info(f"Best model saved at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
                     model.train()
-                logging.info("=" * 100)
+                # logging.info("=" * 100)
                 
         
         # save model
@@ -267,9 +283,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         logging.info(f"Saving model at Epoch: {epoch}")
         os.makedirs(f"./ckpt/{train_args.run_name}/epoch_{epoch}", exist_ok=True)
         torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/epoch_{epoch}/model.pt")
-        logging.info("=" * 100)
+        # logging.info("=" * 100)
 
-
+    logging.info("=" * 100)
 def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig, rank: int, world_size: int):
     raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
     # 0. load datasets
@@ -291,8 +307,19 @@ def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Pa
 if __name__ == '__main__':
     model_args, train_args, parallel_args = ModelConfig(), TrainConfig(), ParallelConfig() # adjust by editing py
     # print args
-    print(model_args)
-    print(train_args)
-    print(parallel_args)
+    from dataclasses import asdict
+    from pprint import pprint
+    print("=" * 100)
+    print("Model Args:")
+    pprint(asdict(model_args))
+    print("-" * 100)
+    print("Train Args:")
+    pprint(asdict(train_args))
+    print("-" * 100)
+    print("Parallel Args:")
+    pprint(asdict(parallel_args))
+    print("=" * 100)
+    # exit()
+    
     # main
     main(model_args, train_args, parallel_args)
