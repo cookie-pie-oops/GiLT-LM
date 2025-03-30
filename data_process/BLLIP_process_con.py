@@ -9,21 +9,31 @@ from stack_tape_utils import compute_stack_tape
 from datasets import Dataset as HFDataset
 DEBUG = True
 
-def _list_create(doc_path, early_stopping=-1):  # -1 for no limit
-    dataset_list = []
+def _list_create(doc_path, dev_early_stop_each=500, test_early_stop_each=1000):  # -1 for no limit
+    train_list = []
+    dev_list = []
+    test_list = []
     years = ['1987', '1988', '1989']
-    cnt = 0
-    if early_stopping < -1:
-        raise ValueError(
-            "early_stopping should be -1 or a nonnegative integer")
+
+    # if early_stopping < -1:
+    #     raise ValueError(
+    #         "early_stopping should be -1 or a nonnegative integer")
+    dev_dirs = [
+        'w7_001', 'w8_001', 'w9_010'
+    ]
+    test_dirs = [
+        'w7_002', 'w8_002', 'w9_011'
+    ]
     for year in os.listdir(doc_path):
+        dev_cnt = 0
+        test_cnt = 0
         if year not in years:
             continue
         year_dir = os.path.join(doc_path, year)
         if not os.path.isdir(year_dir):
             continue
         # 遍历每个子目录（dir_index）
-        for sub_dir in tqdm(os.listdir(year_dir), desc=f"Processing year {year}"):
+        for sub_dir in tqdm(os.listdir(year_dir), desc=f"Processing year {year}"): # sub_dir be like w7_001
             sub_dir_path = os.path.join(year_dir, sub_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
@@ -39,47 +49,65 @@ def _list_create(doc_path, early_stopping=-1):  # -1 for no limit
                     # 以"(S1"作为分割标记
                     origin_sentences = full_content.split("(S1")
                     for origin_sentence in origin_sentences:
-                        if cnt >= early_stopping and early_stopping != -1:
-                            return dataset_list
                         origin_sentence = origin_sentence.strip()
                         if origin_sentence.strip() == "":
                             continue
                         complete_sentence = "(S1" + origin_sentence
                         # 在这里进行解析，例如调用 constituency_parse 函数
-                        dataset_list.append(complete_sentence)
-                        cnt += 1
+                        # dataset_list.append(complete_sentence)
+                        if sub_dir in dev_dirs and dev_cnt < dev_early_stop_each:
+                            dev_list.append(complete_sentence)
+                            dev_cnt += 1
+                        elif sub_dir in test_dirs and test_cnt < test_early_stop_each:
+                            test_list.append(complete_sentence)
+                            test_cnt += 1
+                        elif sub_dir not in dev_dirs and sub_dir not in test_dirs:
+                            train_list.append(complete_sentence)
+                        else:
+                            # discard
+                            pass
+                        # cnt += 1
+    return train_list, dev_list, test_list
 
-    return dataset_list
 
-
-def parse_and_split(doc_path, sp, dev_num=50000, test_num=100000, early_stopping=-1):
+def parse_and_split(doc_path, sp, dev_num=1500, test_num=3000, early_stopping=-1):
 
     # doc_path = "../Dataset/bliip_87_89_wsj/"
-    original_list = _list_create(doc_path, early_stopping=early_stopping)
+    # original_list = _list_create(doc_path, early_stopping=early_stopping)
+    train_ori, dev_ori, test_ori = _list_create(doc_path, dev_early_stop_each=dev_num//3, test_early_stop_each=test_num//3)
     # split to train,dev,test
     # shuffle
     import random
     # seed
     random.seed(12345)
-    random.shuffle(original_list)
+    random.shuffle(train_ori)
+    random.shuffle(dev_ori)
+    random.shuffle(test_ori)
     # split
-    train_ori = original_list[dev_num + test_num:]
-    dev_ori = original_list[:dev_num]
-    test_ori = original_list[dev_num:dev_num + test_num]
+    # train_ori = train_ori
+    assert len(dev_ori) == dev_num, "dev set size is not equal to dev_num"
+    assert len(test_ori) == test_num, "test set size is not equal to test_num"
     
-    def fix_empty_labels(t):
+    def fix_empty_leaf_nodes(t, unk_token="<unk>"):
         if isinstance(t, str):
+            # t is a leaf node (string)
+            # check if t is empty or contains only whitespace
+            if not t.strip():
+                return unk_token
+            else:
+                return t
+        else:
+            # t is a Tree
+            new_children = []
+            for child in t:
+                fixed_child = fix_empty_leaf_nodes(child, unk_token)
+                new_children.append(fixed_child)
+            # use the fixed children to replace the original children
+            t[:] = new_children
             return t
-        # t is a tree
-        if not t.label().strip():
-            t.set_label("<unk>")
-        # empty children
-        for child in t:
-            fix_empty_labels(child)
-        return t
-
+    
     def parse_sentences(ori_data):
-        discarded = 0
+        discard = 0
         in_sentences = []
         parses = []
         for sent in tqdm(ori_data, desc="Parsing sentences"):
@@ -93,16 +121,18 @@ def parse_and_split(doc_path, sp, dev_num=50000, test_num=100000, early_stopping
             else:
                 tree = sent
             
-            
-            # 如果转换后的 tree 仍不是 Tree（理论上不应该出现），则调用 binarize_tree
-            tree = fix_empty_labels(tree)
+            # collapse unary fail then continue to discard
             try:
                 tree.collapse_unary()
             except:
                 # print("Error: ", tree)
                 # raise e
-                discarded += 1
+                discard += 1
                 continue
+            # if bad_tree:
+            #     tree = fix_empty_leaf_nodes(tree)
+            #     tree.collapse_unary()
+                
             tree.chomsky_normal_form()
             # flatten 处理：将树平铺为一个句子序列，并添加句末符（EOS）
             in_sentences.append(flatten(tree, add_eos=True))
@@ -116,11 +146,14 @@ def parse_and_split(doc_path, sp, dev_num=50000, test_num=100000, early_stopping
                 parses.append(
                     post_process_op(tree, sp)
                 )
+        
+        print("\n# of discarded trees: \n", discard)
         return in_sentences, parses
-
-    train_in_sentences, train_parses = parse_sentences(train_ori)
     dev_in_sentences, dev_parses = parse_sentences(dev_ori)
     test_in_sentences, test_parses = parse_sentences(test_ori)
+    train_in_sentences, train_parses = parse_sentences(train_ori)
+
+    
 
     print("Training set num examples: {}".format(len(train_in_sentences)),
             "Dev set num examples: {}".format(len(dev_in_sentences)),
@@ -187,7 +220,7 @@ if __name__ == '__main__':
     if DEBUG:
         train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1, 1, early_stopping=3)
     else:
-        train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 50000, 100000)
+        train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1500, 3000)
     train_data = make_dataset(train_in_sentences, train_parses, sp, split="train")
     print('=' * 100)
     dev_data = make_dataset(dev_in_sentences, dev_parses, sp, split="dev")
