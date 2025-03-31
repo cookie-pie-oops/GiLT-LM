@@ -12,6 +12,10 @@ import torch.nn as nn
 import json
 import wandb
 import gc
+parser = argparse.ArgumentParser()
+# add: debug or not
+parser.add_argument("--debug", action="store_true", help="debug mode")
+args = parser.parse_args()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -313,23 +317,24 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             
             # no need grad from now on
             with torch.no_grad():
+                sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
                 if (general_step + 1) % train_args.log_interval == 0:
-                    sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
+                    
                     logging.info("=" * 100)
                     logging.info(f"Epoch: {epoch}, Step: {step}, Global Step (+1): {general_step + 1},")
                     # Loss Sum: {loss.item()}, Loss Word: {loss_w.item()}, Loss Attachment: {loss_a.item()},
                     logging.info(f"Loss Word for PPL: {loss_w.item() / sum_of_seq_lengths_item}, Loss Attachment for PPL: {loss_a.item() / sum_of_seq_lengths_item}")
                     logging.info(f"Loss weighted: {loss.item() / sum_of_seq_lengths_item}, LR: {scheduler.get_last_lr()[0]}")
                     logging.info(f"PPL this time: {torch.exp(torch.tensor((loss_w + loss_a).item() / sum_of_seq_lengths_item))}")
-                    wandb.log({
-                        "train_loss": loss.item() / sum_of_seq_lengths_item,
-                        "train_loss_word": loss_w.item() / sum_of_seq_lengths_item,
-                        "train_loss_attachment": loss_a.item() / sum_of_seq_lengths_item,
-                        "train_ppl": torch.exp(torch.tensor((loss_w + loss_a).item() / sum_of_seq_lengths_item)),
-                        "epoch": epoch,
-                        "step": step,
-                        "global_step": general_step + 1,
-                    })
+                wandb.log({
+                    "train_loss": loss.item() / sum_of_seq_lengths_item,
+                    "train_loss_word": loss_w.item() / sum_of_seq_lengths_item,
+                    "train_loss_attachment": loss_a.item() / sum_of_seq_lengths_item,
+                    "train_ppl": torch.exp(torch.tensor((loss_w + loss_a).item() / sum_of_seq_lengths_item)),
+                    "epoch": epoch,
+                    "step": step,
+                    "global_step": general_step + 1,
+                })
                 del loss, loss_w, loss_a
                 # eval w/ dev set
                 # if best then save
@@ -341,13 +346,13 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                     eval_losses_w = []
                     eval_losses_a = []
                     n_words = 0
-                    for step, batch in enumerate(dev_dataloader):
-                        ids = batch["ids"]
+                    for _, eval_batch in enumerate(dev_dataloader):
+                        ids = eval_batch["ids"]
                         ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id), ids], dim=1)
                         target = ids[:, 1:].to(device)
                         data = ids[:, :-1].to(device)
-                        stack_tape = batch["stack_tape"].to(device)
-                        attachment_labels = batch["attachment_labels"].to(device)
+                        stack_tape = eval_batch["stack_tape"].to(device)
+                        attachment_labels = eval_batch["attachment_labels"].to(device)
                         # forward
                         loss_w, loss_a = model.forward(
                             data,
@@ -360,10 +365,10 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         loss_a = loss_a.detach().cpu().sum()
                         eval_losses_w.append(loss_w.item())
                         eval_losses_a.append(loss_a.item())
-                        n_words += torch.sum(batch["lengths"]).item()
+                        n_words += torch.sum(eval_batch["lengths"]).item()
                     eval_loss_w_sum = np.sum(eval_losses_w)
                     eval_loss_a_sum = np.sum(eval_losses_a)
-                    # sum_of_all_seq_lengths = np.sum([torch.sum(batch["lengths"]).item() for batch in dev_dataloader])
+                    # sum_of_all_seq_lengths = np.sum([torch.sum(eval_batch["lengths"]).item() for eval_batch in dev_dataloader])
                     # assert sum_of_all_seq_lengths == n_words, f"sum_of_all_seq_lengths: {sum_of_all_seq_lengths}, n_words: {n_words}"
                     eval_loss_w = eval_loss_w_sum / n_words
                     eval_loss_a = eval_loss_a_sum / n_words
@@ -388,9 +393,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                                 "best_eval_attachment_loss": eval_loss_a,
                                 "best_eval_ppl": all_ppl.item(),
                                 "best_eval_word_ppl": word_ppl.item(),
-                                "epoch": epoch,
-                                "step": step,
-                                "global_step": general_step + 1,
+                                # "epoch": epoch,
+                                # "step": step,
+                                # "global_step": general_step + 1,
                             }
                             json.dump(ddict, f)
                         logging.info(f"Best model saved at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
@@ -442,7 +447,12 @@ def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Pa
 
 
 if __name__ == '__main__':
-    model_args, train_args, parallel_args = ModelConfig(), TrainConfig(), ParallelConfig() # adjust by editing py
+    if args.debug:
+        # debug mode
+        from config import DebugTrainConfig, DebugParallelConfig
+        model_args, train_args, parallel_args = ModelConfig(), DebugTrainConfig(), DebugParallelConfig() # adjust by editing py
+    else:
+        model_args, train_args, parallel_args = ModelConfig(), TrainConfig(), ParallelConfig() # adjust by editing py
     # print args
     from dataclasses import asdict
     from pprint import pprint

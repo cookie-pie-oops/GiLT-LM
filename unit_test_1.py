@@ -20,7 +20,7 @@ class TestPushdownTransformerConstituency(unittest.TestCase):
         self.pad_id = 0
         self.bos_id = 1
         self.eos_id = 2
-        self.max_stack_depth = 200  # 测试时使用较小的堆栈深度上限
+        self.max_stack_depth = 50  # 测试时使用较小的堆栈深度上限
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = PushdownTransformerConstituency(

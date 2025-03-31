@@ -5,7 +5,7 @@ class ModelConfig:
     w_dim: int = 1024
     n_head: int = 8
     d_head: int = 128
-    d_inner: int = 4096
+    d_inner: int = 4096 # for Positionwise FF
     num_layers: int = 16
     dropout: float = 0 # txl 0.1?
     dropoutatt: float = 0 # txl 0.1?
@@ -14,7 +14,8 @@ class ModelConfig:
     eos_id: int = 2
     stack_pad_id: int = -100
     pre_lnorm: bool = False
-    max_stack_depth: int = 200
+    max_stack_depth: int = 50
+    
     
 @dataclass
 class ParallelConfig:
@@ -26,6 +27,14 @@ class ParallelConfig:
     # elif parallel == "dp":
     #     # we have dim alignment bugs in dp
     #     raise NotImplementedError("dp is not implemented yet")
+    
+@dataclass
+class DebugParallelConfig:
+    parallel: str = "none" # "ddp" or "dp" or "none"
+    # local_rank: int = 0
+    assert parallel in ["ddp", "dp", "none"], f"parallel must be one of ['ddp', 'dp', 'none'], but got {parallel}"
+    if parallel == "ddp":
+        raise NotImplementedError("ddp is not implemented yet")
 
 @dataclass
 class TrainConfig:
@@ -49,6 +58,7 @@ class TrainConfig:
     attachment_ratio: float = 1.0
     
     max_grad_norm: float = 3.0
+    # GAS
     gradient_accumulation_steps: int = 8 # grad_accumulation_steps * real_batch_size = 64
     log_interval: int = 100 # debug: 1, normal: 100
     eval_interval: int = 1000 # debug: 1, normal: 1000
@@ -57,11 +67,27 @@ class TrainConfig:
     
     
     # DEBUG
-    # run_name = "push_bllip_con_debug"
-    # epochs: int = 50
-    # batch_size: int = 1
-    # start_lr: float = 1e-6
-    # max_lr: float = 1e-4
-    # warmup_steps: int = 45
-    # log_interval: int = 1
-    # eval_interval: int = 1
+@dataclass
+class DebugTrainConfig:
+    run_name = "push_bllip_con_debug_1epoch_bs64_gas1"
+    seed: int = 12345
+    proposed_batch_size: int = 64
+    num_workers: int = 0
+    epochs: int = 1
+    
+    max_lr: float = 3e-4
+    start_lr: float = 1e-7
+    warmup_steps: int = 8000
+    eta_min: float = 3e-7
+    
+    weight_decay: float = 0 # debug: 0.01, normal: 0
+
+    attachment_ratio: float = 1.0
+    
+    max_grad_norm: float = 3.0
+    # GAS
+    gradient_accumulation_steps: int = 2 # grad_accumulation_steps * real_batch_size = 64
+    log_interval: int = 100 # debug: 1, normal: 100
+    eval_interval: int = 1000 # debug: 1, normal: 1000
+    
+    batch_size: int = proposed_batch_size // gradient_accumulation_steps

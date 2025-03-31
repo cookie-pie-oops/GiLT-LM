@@ -129,6 +129,8 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
     #     super().init_weights()
         
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, mems=None, past_keys=None, past_values=None, cache=False):
+        if cache or past_keys or past_values or mems is not None:
+            raise NotImplementedError("We ignore TXL mems for now.")
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)
 
         if mems is not None:
@@ -215,7 +217,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             return output
 
 class PushdownMultiHeadAttn(nn.Module):
-    def __init__(self, n_head, d_model, d_head, dropout, pre_lnorm=False, max_stack_depth=200):
+    def __init__(self, n_head, d_model, d_head, dropout, pre_lnorm=False, max_stack_depth=50):
         super(PushdownMultiHeadAttn, self).__init__()
         self.n_head = n_head # n_heads | n_head
         self.d_model = d_model # state_size | n_embd
@@ -237,7 +239,7 @@ class PushdownMultiHeadAttn(nn.Module):
         self.pre_lnorm = pre_lnorm
         self.max_stack_depth = max_stack_depth
         
-        self.beta = nn.Embedding(max_stack_depth, self.d_head) # depth_embed
+        self.beta = nn.Embedding(max_stack_depth, self.n_head * self.d_head) # depth_embed
         
         self.r_net = nn.Linear(d_model, n_head * d_head, bias=False) # r_net for projecting sinuoidal positional embedding
 
@@ -314,36 +316,78 @@ class PushdownMultiHeadAttn(nn.Module):
         # stack_tape: (B, T') -> beta 映射后为 (B, T', head_dim)
         # unsqueeze 后变为 (B, 1, T', head_dim)，便于广播到每个 head
         
-        # w_head_k shape: [klen, bsz, n_head, d_head] = [T', B, n_head, head_dim]
-        depth_emb = self.beta(stack_tape.long()).unsqueeze(1) # shape [bsz, 1, klen, klen, d_head] = [B, 1, T', T', head_dim]
-        # w_head_k should be [B, n_head, 1, T', head_dim]
-        # [T', B, n_head, head_dim] -> [B, n_head, T', head_dim] -> [B, n_head, 1, T', head_dim]
-        w_head_k = w_head_k.permute(1, 2, 0, 3).unsqueeze(2)
-        w_head_k = w_head_k + depth_emb # shape [B, n_head, T', T', head_dim]
-        # from utils import tensor_memory
-        # print(tensor_memory(w_head_k))
-        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
-        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
-        torch.cuda.empty_cache()
-        # NOTE: Original ABCD calculation in TXL
-        #### compute attention score
-        #### compute attention score
-        rw_head_q = w_head_q + r_w_bias                                         # qlen x bsz x n_head x d_head
-        # AC = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q, w_head_k))             # qlen x klen x bsz x n_head
-        # q: [qlen, bsz, n_head, d_head] = [T, B, n_head, head_dim]
-        # want [B, n_head, T, 1, head_dim]
-        rw_head_q = rw_head_q.permute(1, 2, 0, 3).unsqueeze(3)
-        # k: [B, n_head, T', T', head_dim]
-        AC = (rw_head_q @ w_head_k.transpose(-2, -1)).squeeze(3) # [B, n_head, T, T'] = [bsz, n_head, qlen, klen]
-        AC = AC.permute(2, 3, 0, 1) # [qlen, klen, bsz, n_head] # FIXME: check if this is correct
 
         rr_head_q = w_head_q + r_r_bias
-        BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, r_head_k))              # qlen x klen x bsz x n_head
+        # NOTE: Original ABCD calculation in TXL
+        BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, r_head_k))  # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
         BD = self._rel_shift(BD)
+        
+        attn_score = None
+        if True: # DONE: gather to save gpu memory
+            # NOTE: We want to make attn_score = AC_0 (biased q * ordinary k) + AC_depth (biased q * depth component for k) + BD 
+            
+            # 1. Compute AC_0
+            # AC w/o beta: AC = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q, w_head_k)) # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
+            rw_head_q = w_head_q + r_w_bias  # shape [qlen, bsz, n_head, d_head] + [n_head, d_head] = [qlen, bsz, n_head, d_head]
+            # w_head_k shape: [klen, bsz, n_head, d_head] = [T', B, n_head, head_dim]
+            # AC: rw_head_q @ w_head_k at last dim
+            
+            # AC_0 but we can in place
+            AC = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q, w_head_k)) # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
+            
+            # 2. Compute AC_depth
+            # 2.1 Compute the table from which AC_depth gathers
+            
+            # d_emb_table: shape [bsz, max_stack_depth, n_head*d_head]
+            d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, n_head*d_head]
+            
+            # Moderate_wk in main branch [max_stack_depth, n_head, d_head] = [max_stack_depth, n_head, head_dim]
+            table_wk = d_emb_table.view(self.max_stack_depth, self.n_head, self.d_head)
+            
+            # Moderate_AC in main branch
+            table_AC_depth = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, table_wk)) # shape [qlen, max_stack_depth, bsz, n_head] = [T, max_stack_depth, B, n_head]
+            
+            # 2.2 Gather the table according to stack_tape & Add to AC_0
+            stack_tape = stack_tape.permute(1, 2, 0) # shape [qlen, klen, bsz] = [T, T', B]
+            # key pos: j, query pos: k. We use j to gather the table
+            # stack_tape.unsqueeze(-1) expands the shape to [qlen, klen, bsz, 1] 
+            # -> expand: [qlen, klen, bsz, n_head] 
+            # -> ok for gather
+            
+            # OLD
+            # AC_depth_gathered = table_AC_depth.gather(1, stack_tape.unsqueeze(-1).expand(-1, -1, -1, self.n_head))
+            # attn_score = (AC + BD) + AC_depth_gathered # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
+            
+            # NEW
+            attn_score = AC + BD + table_AC_depth.gather(1, stack_tape.unsqueeze(-1).expand(-1, -1, -1, self.n_head)) # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
+            
+            attn_score.mul_(self.scale)
+        else:
+            # stack_tape: [bsz, qlen, klen] = [B, T, T'], stack_tape[b][i][j] -> d_{i,j} in batch b
+            depth_emb = self.beta(stack_tape.int()) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
+            # _, depth_emb, _ = self.qkv_net(depth_emb).chunk(3, dim=-1) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
+            # d_{i,j} in batch b is depth_emb[b][i][j]
+            # depth_emb = [bsz, qlen, klen, n*d_head] -> [bsz, qlen, klen, n_head, d_head]
+            depth_emb = depth_emb.view(bsz, depth_emb.size(1), depth_emb.size(2), self.n_head, self.d_head)
+            
+            
+            # w_head_k shape: [klen, bsz, n_head, d_head] = [T', B, n_head, head_dim]
+            # depth_emb shape: [bsz, qlen, klen, n_head, d_head] = [B, T, T', n_head, head_dim]
+            # w_head_k should be [bsz, 1, klen, n_head, d_head] to broadcast with depth_emb
+            w_head_k = w_head_k.permute(1, 0, 2, 3).unsqueeze(1) # shape [B, 1, T', n_head, head_dim] = [bsz, 1, klen, n_head, d_head]
+            w_head_k = w_head_k + depth_emb # shape [B, T, T', n_head, d_head] = [bsz, qlen, klen, n_head, head_dim]
+            torch.cuda.empty_cache()
 
-        # [qlen x klen x bsz x n_head]
-        attn_score = AC + BD
-        attn_score.mul_(self.scale)
+            #### compute attention score
+            rw_head_q = w_head_q + r_w_bias  # shape [qlen, bsz, n_head, d_head] + [n_head, d_head] = [qlen, bsz, n_head, d_head]
+            # rw_head_q: [qlen, bsz, n_head, d_head] = [T, B, n_head, head_dim]
+            # w_head_k: [bsz, qlen, klen, n_head, d_head] = [B, T, T', n_head, head_dim]
+            # NOTE: want AC: [qlen, klen, bsz, n_head] = [T, T', B, n_head] as the @ product of rw_head_q and w_head_k
+            AC = torch.einsum("ibhd,bijhd->ijbh", rw_head_q, w_head_k)
+
+            # [qlen x klen x bsz x n_head]
+            attn_score = AC + BD
+            attn_score.mul_(self.scale)
         
         if attn_mask is not None and attn_mask.any().item():
             if attn_mask.dim() == 2:
@@ -449,44 +493,53 @@ class AttachmentHead(nn.Module):
     输入：
       - x: (B, T, n_embd) 隐藏状态序列
       - stack_tape: (B, T, T) 的堆栈深度（整数张量）
-      - next_word: (B, T, embd_dim) 表示当前新预测的 token（经过 MLP 得到的向量）
+      - next_word: (B, T, depth_embd_dim) 表示当前新预测的 token（经过 MLP 得到的向量）
     输出：
       - 返回形状为 (B, T, T+1) 的 attachment logits（经过因果 mask 后）
     """
 
-    def __init__(self, d_model, embd_dim, max_depth=200, dropout=0.1):
+    def __init__(self, d_model, depth_embd_dim, max_depth=50, dropout=0.1):
         super(AttachmentHead, self).__init__()
-        self.d_model = d_model
-        self.embd_dim = embd_dim # dim of the embedding of words
+        self.d_model = d_model # also for word emb
+        self.depth_embd_dim = depth_embd_dim # dim of the embedding of words
         # 将输入 x 映射到 query 和 key（拼接后维度为 4*embd_dim）
         self.data_to_qk = nn.Linear(d_model, 4 * d_model) # FIXME: check the dim of q,k; in the original codebase it's 2*embd_dim
         # 用于计算 next_word 的 query 与 key 的 MLP，
         # 输入为拼接后的 [q, next_word]，输出维度为 embd_dim
         self.q_next_word_mlp = nn.Sequential(
-            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
+            nn.Linear(3 * d_model, 2 * d_model),
             nn.ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(2 * d_model, 2 * d_model),
         )
         self.k_next_word_mlp = nn.Sequential(
-            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
+            nn.Linear(3 * d_model, 2 * d_model),
             nn.ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(2 * d_model, 2 * d_model),
         )
         # 将 key 与堆栈深度信息拼接后映射回 embd_dim
-        self.key_and_stack_mlp = nn.Sequential(
-            nn.Linear(2 * d_model + embd_dim, 2 * d_model + embd_dim),
-            nn.ReLU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(2 * d_model + embd_dim, 2 * d_model),
-        )
+        if dropout == 0:
+            self.key_and_stack_mlp = nn.Sequential( # intermediate 0 (input): k & depth_embed == (B, T, T', 2*d_model + depth_embd_dim)
+                nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model + depth_embd_dim), # intermediate 1: still k & depth_embed: (B, T, T', 2*d_model + depth_embd_dim)
+                nn.ReLU(inplace=True), # intermediate 2: k & depth_embed: (B, T, T', 2*d_model + depth_embd_dim)
+                # nn.Dropout(p=dropout), # NOTE: we don't need dropout here for saving memory
+                nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model), # intermediate 3 (out): k & depth_embed == (B, T, T', 2*d_model)
+            )
+        else:
+            self.key_and_stack_mlp = nn.Sequential(
+                nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model + depth_embd_dim),
+                nn.ReLU(inplace=True),
+                nn.Dropout(p=dropout),
+                nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model),
+            )
         # 堆栈深度嵌入
-        self.beta = nn.Embedding(max_depth, embd_dim)
+        self.beta = nn.Embedding(max_depth, depth_embd_dim)
         # 这里 bias 我们在 forward 中动态生成因果 mask
         
         # size of q/k/v is 2*d_model=D
         self.scale = 1 / ((2 * d_model) ** 0.5)
+        self.max_stack_depth = max_depth
 
 
     def forward(self, x, stack_tape, next_word):
@@ -496,7 +549,7 @@ class AttachmentHead(nn.Module):
         B, T, C = x.size()
         # 得到 q 和 k，形状均为 (B, T, embd_dim)
         qk = self.data_to_qk(x)
-        q, k = torch.split(qk, 2*self.embd_dim, dim=2) # (B, T, 2*d_model) each
+        q, k = torch.split(qk, 2*self.d_model, dim=2) # (B, T, 2*d_model) each
 
         # 计算 next_word 的 query 与 key
         # 拼接 [q, next_word]，假设 next_word 的最后一维与 embd_dim 相同
@@ -511,32 +564,60 @@ class AttachmentHead(nn.Module):
         # D = 2*d_model
 
         # 将 k 扩展到每个目标位置： (B, T, D) -> (B, 1, T, D) -> (B, T, T, D)
-        k_exp = k.unsqueeze(1).expand(-1, T, -1, -1)
+        k = k.unsqueeze(1).expand(-1, T, -1, -1) # expanded_k
         # detach k
-        k = k.detach().cpu()
+        # k = k.detach().cpu()
         
 
+        # from utils import tensor_memory
+        
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         
         torch.cuda.empty_cache()
+        if False:
+            # TODO: gather to save gpu memory, 
+            # TODO: but need to separate key_and_stack_mlp
+            d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, embd_dim]
+            tabled_stack_info = d_emb_table.view(self.max_stack_depth, self.depth_embd_dim) # shape [max_stack_depth, embd_dim]
+        else:
+            # Compute the depth emb. 
+            # stack_tape (B, T, T') -> (B, T, T', embd_dim=D)
+            depth_emb = self.beta(stack_tape.int())
+            stack_tape = stack_tape.detach().cpu()
+            # concatenate k and depth_emb
+            # print("After depth emb net")
+            # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+            # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
+            # print("depth_emb:", tensor_memory(depth_emb))
+            # print("k:", tensor_memory(k))
+            k = self.key_and_stack_mlp(
+                torch.cat([k, depth_emb], dim=-1)
+            ) # (B, T, T', D+embd_dim) -> (B, T, T', D) 
+            # print("k:", tensor_memory(k))
+            torch.cuda.empty_cache()
+            depth_emb = depth_emb.detach().cpu()
+            # print("!! After key stack mlp")
+            # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+            # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
+            # 计算 attachment logits
+            # next_word_q: (B, T, D)
+            # k_with_info: (B, T, T', D)
+            
+            # attach_logits = (next_word_q.unsqueeze(
+            #     2) @ k.transpose(-2, -1)).squeeze(2)  # (B, T, T')
+            
+            # use einsum?
+            attach_logits = torch.einsum('bid,bijd->bij', next_word_q, k)  # (B, T, T')
+                
+            k = k.detach().cpu()
+            attach_logits.mul_(self.scale) # (B, T, T)
 
-        # 计算堆栈深度嵌入：stack_tape (B, T, T) -> (B, T, T, embd_dim=D)
-        depth_emb = self.beta(stack_tape.long())
-        stack_tape = stack_tape.detach().cpu()
-        # 拼接 k 与深度信息，通过 MLP 得到融合后的 k 信息
-        k_with_info = self.key_and_stack_mlp(
-            torch.cat([k_exp, depth_emb], dim=-1)) # (B, T, T, D)
-        k_exp = k_exp.detach().cpu()
-
-        # 计算 attachment logits
-        # next_word_q: (B, T, D) -> unsqueeze为 (B, T, 1, D)
-        # k_with_info: (B, T, T, D) -> 转置最后两维得到 (B, T, D, T)
-        attach_logits = (next_word_q.unsqueeze(
-            2) @ k_with_info.transpose(-2, -1)).squeeze(2)  # (B, T, T)
-        attach_logits.mul_(self.scale) # (B, T, T)
-        # detach k_with_info
-        # k_with_info = k_with_info.detach().cpu()
-        # memory summary
         torch.cuda.empty_cache()
+        # print("After attach logits computation")
+        # print("k:", tensor_memory(k))
+        # print("next_q:", tensor_memory(next_word_q))
+        # print("attach_logits:", tensor_memory(attach_logits))
         # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
         # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         # 计算 self-attachment 得分（no-reduce 情况）
@@ -546,6 +627,7 @@ class AttachmentHead(nn.Module):
         logits_self.mul_(self.scale) # (B, T, 1)
 
         # 在 attach_logits 最后拼接一列 0 值，使其形状变为 (B, T, T+1)
+        
         # pad_tensor = torch.zeros(B, T, 1, device=attach_logits.device)
         # attach_logits_l = torch.cat(
         #     [attach_logits, pad_tensor], dim=-1)  # (B, T, T+1)
@@ -553,17 +635,29 @@ class AttachmentHead(nn.Module):
             [attach_logits, torch.zeros(B, T, 1, device=attach_logits.device)], dim=-1
         )  # (B, T, T+1)
         
+        
+        
         ### now insert logits_ self into the k +1 th position of attach_logits for each k
         # i.e. [n_batch, n_dest, n_src] -> [n_batch, n_dest, n_src + 1]
         # (B, T, 1) -> (B, T, T+1)
-        indices = (1 + torch.arange(T, device=attach_logits.device)
-                   ).unsqueeze(0).unsqueeze(-1).expand(B, -1, -1)
-        # 将 logits_self 插入到第 k+1 个位置
         
+        # indices = (1 + torch.arange(T, device=attach_logits.device)
+        #            ).unsqueeze(0).unsqueeze(-1).expand(B, -1, -1)
+        # # 将 logits_self 插入到第 k+1 个位置
+        
+        # logits = attach_logits_l.scatter(
+        #     2, indices, logits_self)  # (B, T, T+1)
+        
+        # indices = indices.detach().cpu()
+
         logits = attach_logits_l.scatter(
-            2, indices, logits_self)  # (B, T, T+1)
-        
-        indices = indices.detach().cpu()
+            2,
+            (1 + torch.arange(T, device=attach_logits.device)
+             .unsqueeze(0).unsqueeze(-1).expand(B, -1, -1)),
+            logits_self,
+            # (B, T, 1) -> (B, T, T+1)
+        )
+
 
         # 在 logits 的第一行前填充一行全 0，使其形状变为 (B, T+1, T+1)
         # zeros_row = torch.zeros(B, 1, logits.size(2), device=logits.device)
@@ -596,7 +690,7 @@ class PushdownTransformerConstituency(nn.Module):
                  w_dim = 380,
                  n_head = 10,
                  d_head = 38,
-                 d_inner = 900,
+                 d_inner = 900, # for FF
                  num_layers = 16,
                  dropout = 0.1,
                  dropoutatt = 0.0,
@@ -605,7 +699,7 @@ class PushdownTransformerConstituency(nn.Module):
                  eos_id = 2,
                  stack_pad_id = -100,
                  pre_lnorm = False,
-                 max_stack_depth = 200
+                 max_stack_depth = 50
                  ):
         super(PushdownTransformerConstituency, self).__init__()
         self.vocab_size = vocab_size
@@ -623,7 +717,7 @@ class PushdownTransformerConstituency(nn.Module):
         self.projection.weight = self.emb.weight
 
         self.num_layers = num_layers
-        self.w_dim = w_dim
+        # self.w_dim = w_dim
             
         self.layers = nn.ModuleList()
 
@@ -634,10 +728,10 @@ class PushdownTransformerConstituency(nn.Module):
         # PUSHDOWN LAYER FOR CONSTITUENCY
         self.max_depth = max_stack_depth
         self.pushdown_final_layer = RelPartialLearnablePushdownLayer(n_head, w_dim, d_head, d_inner, dropout, dropoutatt,
-                                pre_lnorm=pre_lnorm, max_stack_depth=200)
+                                pre_lnorm=pre_lnorm, max_stack_depth=max_stack_depth)
         
         # ATTACHMENT HEAD
-        self.attachment_head = AttachmentHead(d_model=w_dim, embd_dim=w_dim, max_depth=max_stack_depth, dropout=dropout)
+        self.attachment_head = AttachmentHead(d_model=w_dim, depth_embd_dim=d_head, max_depth=max_stack_depth, dropout=dropout)
         
         # POSITIONAL EMBEDDINGS FOR TXL STRUCTURES
         self.pos_emb = PositionalEmbedding(w_dim)
@@ -724,7 +818,15 @@ class PushdownTransformerConstituency(nn.Module):
         next_word = self.emb(target) # shape [T, B, embd_dim] # x2, x3, ..., xT+1
 
         # forward needs x shape (B, T, d_model), stack_tape shape (B, T, T), next_word shape (B, T, embd_dim)
+        # print("ATTACHMENT HEAD")
+        # print("Before")
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
+        # print("In")
         attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1]
+        # print("After")
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         # r2, r3, ..., rT+1
         # attach_logits[b, t, t+1] 表示在 t 时刻预测下一个token: hat x t+1, 选择 hat x t+1 作为 reduce (i.e. pure shift) 的概率
         # attach_logits[b, t, k<=t] 表示在 t 时刻预测下一个token: hat x k, 选择 hat x k 作为 reduce (i.e. reduce + shift) 的概率
