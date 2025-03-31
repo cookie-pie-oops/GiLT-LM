@@ -18,8 +18,8 @@ class ModelConfig:
     
 @dataclass
 class ParallelConfig:
-    parallel: str = "none" # "ddp" or "dp" or "none"
-    local_rank: int = 0
+    parallel: str = "dp" # "ddp" or "dp" or "none"
+    # local_rank: int = 0
     assert parallel in ["ddp", "dp", "none"], f"parallel must be one of ['ddp', 'dp', 'none'], but got {parallel}"
     if parallel == "ddp":
         raise NotImplementedError("ddp is not implemented yet")
@@ -32,8 +32,8 @@ class TrainConfig:
     run_name = "push_bllip_con_test"
     
     seed: int = 12345
-    batch_size: int = 64
-    num_workers: int = 8
+    proposed_batch_size: int = 64 # 64?
+    num_workers: int = 0
     epochs: int = 4 # debug: 50, normal: 4
     
     max_lr: float = 3e-4 # debug: 1e-2
@@ -49,14 +49,17 @@ class TrainConfig:
     attachment_ratio: float = 1.0
     
     max_grad_norm: float = 3.0
-    gradient_accumulation_steps: int = 1 # 
-    log_interval: int = 1 # debug: 1, normal: 100
-    eval_interval: int = 1 # debug: 1, normal: 1000
+    gradient_accumulation_steps: int = 8 # grad_accumulation_steps * real_batch_size = 64
+    log_interval: int = 100 # debug: 1, normal: 100
+    eval_interval: int = 1000 # debug: 1, normal: 1000
+    
+    batch_size: int = proposed_batch_size // gradient_accumulation_steps
     
     
     # DEBUG
     # run_name = "push_bllip_con_debug"
     # epochs: int = 50
+    # batch_size: int = 1
     # start_lr: float = 1e-6
     # max_lr: float = 1e-4
     # warmup_steps: int = 45
