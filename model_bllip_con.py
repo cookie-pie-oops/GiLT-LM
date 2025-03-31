@@ -195,7 +195,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
 
         # [qlen x bsz x n_head x d_head]
-        attn_vec = attn_vec.contiguous().view(
+        attn_vec = attn_vec.reshape(
             attn_vec.size(0), attn_vec.size(1), self.n_head * self.d_head)
 
         ##### linear projection
@@ -280,15 +280,6 @@ class PushdownMultiHeadAttn(nn.Module):
         
         if mems is not None:
             raise NotImplementedError("We ignore TXL mems for now.")
-            cat = torch.cat([mems, w], 0)
-            if self.pre_lnorm:
-                w_heads = self.qkv_net(self.layer_norm(cat))
-            else:
-                w_heads = self.qkv_net(cat)
-            r_head_k = self.r_net(r) # shape [rlen, n_head * d_head] <-- This is projected R_{i-j} for term B/D
-
-            w_head_q, w_head_k, w_head_v = torch.chunk(w_heads, 3, dim=-1) # k/v shape [klen, bsz, n_head, d_head]
-            w_head_q = w_head_q[-qlen:] # shape [qlen, bsz, n_head, d_head]
         else:
             if self.pre_lnorm:
                 w_heads = self.qkv_net(self.layer_norm(w))
@@ -329,7 +320,11 @@ class PushdownMultiHeadAttn(nn.Module):
         # [T', B, n_head, head_dim] -> [B, n_head, T', head_dim] -> [B, n_head, 1, T', head_dim]
         w_head_k = w_head_k.permute(1, 2, 0, 3).unsqueeze(2)
         w_head_k = w_head_k + depth_emb # shape [B, n_head, T', T', head_dim]
-        
+        # from utils import tensor_memory
+        # print(tensor_memory(w_head_k))
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
+        torch.cuda.empty_cache()
         # NOTE: Original ABCD calculation in TXL
         #### compute attention score
         #### compute attention score
@@ -365,7 +360,7 @@ class PushdownMultiHeadAttn(nn.Module):
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
 
         # [qlen x bsz x n_head x d_head]
-        attn_vec = attn_vec.contiguous().view(
+        attn_vec = attn_vec.reshape(
             attn_vec.size(0), attn_vec.size(1), self.n_head * self.d_head)
 
         ##### linear projection
@@ -378,7 +373,12 @@ class PushdownMultiHeadAttn(nn.Module):
         else:
             ##### residual connection + layer normalization
             output = self.layer_norm(w + attn_out)
+        torch.cuda.empty_cache()
 
+        # from utils import tensor_memory
+        # print(tensor_memory(output))
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         if cache:
             return output, new_key, new_value
         else:
@@ -487,24 +487,7 @@ class AttachmentHead(nn.Module):
         
         # size of q/k/v is 2*d_model=D
         self.scale = 1 / ((2 * d_model) ** 0.5)
-        
-    # def init_weights(self):
-    #     nn.init.kaiming_normal_(self.data_to_qk.weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.q_next_word_mlp[0].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.k_next_word_mlp[0].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.q_next_word_mlp[3].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.k_next_word_mlp[3].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.key_and_stack_mlp[0].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.kaiming_normal_(self.key_and_stack_mlp[3].weight, mode='fan_in', nonlinearity='relu')
-    #     nn.init.normal_(self.beta.weight, mean=0.0, std=0.02)
-    #     # bias -> 0
-    #     nn.init.zeros_(self.data_to_qk.bias)
-    #     nn.init.zeros_(self.q_next_word_mlp[0].bias)
-    #     nn.init.zeros_(self.k_next_word_mlp[0].bias)
-    #     nn.init.zeros_(self.q_next_word_mlp[3].bias)
-    #     nn.init.zeros_(self.k_next_word_mlp[3].bias)
-    #     nn.init.zeros_(self.key_and_stack_mlp[0].bias)
-    #     nn.init.zeros_(self.key_and_stack_mlp[3].bias)
+
 
     def forward(self, x, stack_tape, next_word):
         # next_word 是当前预测的 token，形状为 (B, T, embd_dim = d_model now)
@@ -520,53 +503,74 @@ class AttachmentHead(nn.Module):
         # print(q.shape)
         # print(next_word.shape)
         cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*d_model)
+        q = q.detach().cpu()
+        next_word = next_word.detach().cpu()
         next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, 2*d_model)
         next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, 2*d_model)
         
         # D = 2*d_model
 
         # 将 k 扩展到每个目标位置： (B, T, D) -> (B, 1, T, D) -> (B, T, T, D)
-        k_exp = k.unsqueeze(1).repeat(1, T, 1, 1)
+        k_exp = k.unsqueeze(1).expand(-1, T, -1, -1)
+        # detach k
+        k = k.detach().cpu()
+        
+
+        
+        torch.cuda.empty_cache()
 
         # 计算堆栈深度嵌入：stack_tape (B, T, T) -> (B, T, T, embd_dim=D)
         depth_emb = self.beta(stack_tape.long())
-
+        stack_tape = stack_tape.detach().cpu()
         # 拼接 k 与深度信息，通过 MLP 得到融合后的 k 信息
         k_with_info = self.key_and_stack_mlp(
             torch.cat([k_exp, depth_emb], dim=-1)) # (B, T, T, D)
-        # logging.debug(k_with_info)
-        # exit()
-        k_with_info = k_with_info * self.scale
+        k_exp = k_exp.detach().cpu()
 
         # 计算 attachment logits
         # next_word_q: (B, T, D) -> unsqueeze为 (B, T, 1, D)
         # k_with_info: (B, T, T, D) -> 转置最后两维得到 (B, T, D, T)
         attach_logits = (next_word_q.unsqueeze(
             2) @ k_with_info.transpose(-2, -1)).squeeze(2)  # (B, T, T)
-
+        attach_logits.mul_(self.scale) # (B, T, T)
+        # detach k_with_info
+        # k_with_info = k_with_info.detach().cpu()
+        # memory summary
+        torch.cuda.empty_cache()
+        # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
+        # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         # 计算 self-attachment 得分（no-reduce 情况）
-        next_word_k = next_word_k * self.scale
+        # next_word_k.mul_(self.scale) # (B, T, D)
         logits_self = (next_word_q.unsqueeze(
             2) @ next_word_k.unsqueeze(3)).squeeze(2)  # (B, T, 1)
+        logits_self.mul_(self.scale) # (B, T, 1)
 
         # 在 attach_logits 最后拼接一列 0 值，使其形状变为 (B, T, T+1)
-        pad_tensor = torch.zeros(B, T, 1, device=attach_logits.device)
+        # pad_tensor = torch.zeros(B, T, 1, device=attach_logits.device)
+        # attach_logits_l = torch.cat(
+        #     [attach_logits, pad_tensor], dim=-1)  # (B, T, T+1)
         attach_logits_l = torch.cat(
-            [attach_logits, pad_tensor], dim=-1)  # (B, T, T+1)
-
+            [attach_logits, torch.zeros(B, T, 1, device=attach_logits.device)], dim=-1
+        )  # (B, T, T+1)
+        
         ### now insert logits_ self into the k +1 th position of attach_logits for each k
         # i.e. [n_batch, n_dest, n_src] -> [n_batch, n_dest, n_src + 1]
         # (B, T, 1) -> (B, T, T+1)
         indices = (1 + torch.arange(T, device=attach_logits.device)
-                   ).unsqueeze(0).unsqueeze(-1).repeat(B, 1, 1)
+                   ).unsqueeze(0).unsqueeze(-1).expand(B, -1, -1)
         # 将 logits_self 插入到第 k+1 个位置
         
         logits = attach_logits_l.scatter(
             2, indices, logits_self)  # (B, T, T+1)
+        
+        indices = indices.detach().cpu()
 
         # 在 logits 的第一行前填充一行全 0，使其形状变为 (B, T+1, T+1)
-        zeros_row = torch.zeros(B, 1, logits.size(2), device=logits.device)
-        logits = torch.cat([zeros_row, logits], dim=1)  # (B, T+1, T+1)
+        # zeros_row = torch.zeros(B, 1, logits.size(2), device=logits.device)
+        # logits = torch.cat([zeros_row, logits], dim=1)  # (B, T+1, T+1)
+        logits = torch.cat(
+            [torch.zeros(B, 1, logits.size(2), device=logits.device), logits], dim=1
+        )  # (B, T+1, T+1)
 
         # 构造因果 mask：下三角 mask，形状为 (1, T+1, T+1)
         mask = torch.tril(torch.ones(
@@ -578,6 +582,7 @@ class AttachmentHead(nn.Module):
         # 1 1 1 1 0
         # 1 1 1 1 1
         logits = logits.masked_fill(mask == 0, float("-inf"))
+        mask = mask.detach().cpu()
 
         # 去掉最上面一行，返回 (B, T, T+1)
         return logits[:, 1:]
@@ -729,29 +734,28 @@ class PushdownTransformerConstituency(nn.Module):
         # mask the attach_logits with attachment_mask
         # print("ATTACH MASK", attachment_mask.shape)
         
-        logging.debug("ATTACH LABEL")
-        logging.debug(attachment_labels.shape)
-        logging.debug("ATTACH LOGITS")
-        logging.debug(attach_logits.shape)
-        logging.debug("SLICED 2D ATTACH LOGITS")
-        logging.debug(attach_logits[0, :, :].detach().cpu().numpy())
+        # logging.debug("ATTACH LABEL")
+        # logging.debug(attachment_labels.shape)
+        # logging.debug("ATTACH LOGITS")
+        # logging.debug(attach_logits.shape)
+        # logging.debug("SLICED 2D ATTACH LOGITS")
+        # logging.debug(attach_logits[0, :, :].detach().cpu().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
-        attach_logits = attach_logits.contiguous() # otherwise may cause error in view
-        
+        # attach_logits = attach_logits.contiguous() # otherwise may cause error in view
+        # attachment_labels = attachment_labels.contiguous()
         # attachment_labels: [B, T] labels for attachment head, so qlen+1 here is the number of classes
-        loss_attach = F.cross_entropy(attach_logits.view(-1, qlen+1), attachment_labels.view(-1), ignore_index=self.stack_pad_id, reduction='sum')
+        loss_attach = F.cross_entropy(attach_logits.reshape(-1, qlen+1), attachment_labels.reshape(-1), ignore_index=self.stack_pad_id, reduction='sum')
         
         # needs: hidden (core_out) 1...k...T; stack tape; next_word (target) which is hat y, 2...T+1 (HERE WE START FROM 1) to input
         # needs stack labels (idxs to reduce with) for each time step and do the reduce
         # NOTE: if attach_logits[b, t, t+1] > 0, then shift, otherwise reduce
         # and make the logits cross-entropy the target
-
-        # LOSS COMPUTATION
-        logits = logits.contiguous()
         
-        logging.debug("SLICED 2D LOGITS")
-        logging.debug(logits[0, :, :].detach().cpu().numpy())
-        loss_words = F.cross_entropy(logits.view(-1, self.vocab_size), target.view(-1), ignore_index=self.pad_id, reduction='sum')
+        # logging.debug("SLICED 2D LOGITS")
+        # logging.debug(logits[0, :, :].detach().cpu().numpy())
+        # logits = logits.contiguous()
+        # target = target.contiguous()
+        loss_words = F.cross_entropy(logits.reshape(-1, self.vocab_size), target.reshape(-1), ignore_index=self.pad_id, reduction='sum')
         # loss = loss_words + loss_attach
         
         if return_h:
