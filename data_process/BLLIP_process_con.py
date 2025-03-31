@@ -7,6 +7,7 @@ from attachment_utils import compute_attachment_labels_text
 from stack_tape_utils import compute_stack_tape
 # HFDataset
 from datasets import Dataset as HFDataset
+from datasets import concatenate_datasets
 DEBUG = True
 
 def _list_create(doc_path, dev_early_stop_each=500, test_early_stop_each=1000):  # -1 for no limit
@@ -208,6 +209,14 @@ def make_dataset(
     
     return data
 
+def chunk_data(data, chunk_size):
+    keys = list(data.keys())
+    total = len(data[keys[0]])
+    chunks = []
+    for i in tqdm(range(0, total, chunk_size), desc="Chunking data"):
+        chunk = {key: data[key][i:i+chunk_size] for key in keys}
+        chunks.append(chunk)
+    return chunks
 
 if __name__ == '__main__':
     DEBUG = False
@@ -221,22 +230,31 @@ if __name__ == '__main__':
         train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1, 1, early_stopping=3)
     else:
         train_in_sentences, train_parses, dev_in_sentences, dev_parses, test_in_sentences, test_parses=parse_and_split(doc_path, sp, 1500, 3000)
+    chunk_size = 15000
     train_data = make_dataset(train_in_sentences, train_parses, sp, split="train")
+    # chunk train_data
+    train_chunks = chunk_data(train_data, chunk_size)
+    # train_datasets = [HFDataset.from_dict(chunk) for chunk in train_chunks]
+    train_datasets = []
+    for chunk in tqdm(train_chunks, desc="Recovering train data from chunks"):
+        train_datasets.append(HFDataset.from_dict(chunk))
+    # train_dataset = HFDataset.from_dict(train_data)
+    print("concatenate train datasets")
+    train_dataset = concatenate_datasets(train_datasets) 
+    train_dataset.save_to_disk("../data/BLLIP_LG_train", max_shard_size="1GB") # LG: large
+    del train_data, train_dataset, train_chunks, train_datasets
     print('=' * 100)
     dev_data = make_dataset(dev_in_sentences, dev_parses, sp, split="dev")
+    dev_dataset = HFDataset.from_dict(dev_data)
+    dev_dataset.save_to_disk("../data/BLLIP_LG_dev", max_shard_size="1GB")
+    del dev_data, dev_dataset
     print('=' * 100)
     test_data = make_dataset(test_in_sentences, test_parses, sp, split="test")
-    # make HF dataset
-    train_dataset = HFDataset.from_dict(train_data)
-    dev_dataset = HFDataset.from_dict(dev_data)
     test_dataset = HFDataset.from_dict(test_data)
-    # save to disk
+    test_dataset.save_to_disk("../data/BLLIP_LG_test", max_shard_size="1GB")
+    # save to disk with smaller writer batch size
     print('=' * 100)
-    train_dataset.save_to_disk("../data/BLLIP_LG_train") # LG: large
-    dev_dataset.save_to_disk("../data/BLLIP_LG_dev")
-    test_dataset.save_to_disk("../data/BLLIP_LG_test")
-    # first 10 of test for testing
-    print('=' * 100)
+    
     if DEBUG:
         print("test dataset ids: ", test_dataset[:1]["ids"])
         # ids back to pieces
@@ -245,5 +263,5 @@ if __name__ == '__main__':
         print("test dataset lengths: ", test_dataset[:1]["lengths"])
         print("test dataset attachment labels: ", test_dataset[:1]["attachment_labels"])
         print("test dataset attachment labels: ", len(test_dataset[:1]["attachment_labels"][0]))
-    
+    print('=' * 100)
     print("vocab size: ", sp.GetPieceSize())
