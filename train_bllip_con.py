@@ -11,6 +11,7 @@ import logging
 import torch.nn as nn
 import json
 import wandb
+import gc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,11 +121,11 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         [
             torch.optim.lr_scheduler.LinearLR(optimizer, 
                                               start_factor=train_args.start_lr / train_args.max_lr,
-                                              total_iters=train_args.warmup_steps),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // train_args.batch_size, train_args.epochs),
+                                              total_iters=train_args.warmup_steps // train_args.gradient_accumulation_steps),
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // (train_args.batch_size * train_args.gradient_accumulation_steps), train_args.epochs),
                                                        eta_min=train_args.eta_min)
         ],
-        milestones=[train_args.warmup_steps] # means the first scheduler will be used for warmup_steps, and the second one will be used for the rest
+        milestones=[train_args.warmup_steps // train_args.gradient_accumulation_steps], # this is the step when the first scheduler will be used
     )
     # 3. train
     # 3.1 set model to train mode
@@ -185,6 +186,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
     
         
         # to tensor
+        
         batch_ids = torch.tensor(padded_ids, dtype=torch.long) # shape: [batch_size, max_len]
         
         batch_lengths = torch.tensor(lengths, dtype=torch.long) # shape: [batch_size]
@@ -192,6 +194,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         batch_stack_tape = torch.stack(padded_stack_tape, dim=0) # shape: [batch_size, max_len, max_len]
         batch_attachment_labels = torch.tensor(padded_attachment_labels, dtype=torch.long) # shape: [batch_size, max_len]
         batch_idxs = torch.tensor(idxs, dtype=torch.long) # shape: [batch_size]
+        del padded_ids, padded_stack_tape, padded_attachment_labels, lengths, idxs
         
         return {
             "ids": batch_ids,
@@ -222,96 +225,127 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
     optimizer.zero_grad()
     for epoch in range(train_args.epochs):
         for step, batch in enumerate(train_dataloader):
+            # print(torch.cuda.memory_summary(device=None, abbreviated=False))
+
+            torch.cuda.empty_cache()
             general_step = epoch * len(train_dataloader) + step
             # 3.3.1 get data
-            ids = batch["ids"].to(device) # [B, T]
+            ids = batch["ids"] # [B, T]
             # cat bos before ids, where bos is model_args.bos_id
-            ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1) # [B, T+1]
+            ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id, device=device), ids.to(device)], dim=1) # [B, T+1]
             target = ids[:, 1:]
             data = ids[:, :-1]
-            # transpose to [max_len, batch_size] to feed in the model...
-            
-            # FIXME:
-            # for dp, we should transpose these in the forward...
-            # data = data.transpose(0, 1) # [T, B]
-            # target = target.transpose(0, 1)
-            
-            
+            ids = ids.detach().cpu()
+            del ids
+
             # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
-            
             attachment_labels = batch["attachment_labels"].to(device) # [B, T]
             
             # print shapes
+            # logging.debug(f"batch size: {ids.shape[0]}")
+            # logging.debug(f"length: {ids.shape[1]}")
+            # logging.debug(f"data shape: {data.shape}")
+            # logging.debug(f"target shape: {target.shape}")
+            # logging.debug(f"stack_tape shape: {stack_tape.shape}")
+            # logging.debug(f"attachment_labels shape: {attachment_labels.shape}")
             
-            logging.debug(f"batch size: {ids.shape[0]}")
-            logging.debug(f"length: {ids.shape[1]}")
-            logging.debug(f"data shape: {data.shape}")
-            logging.debug(f"target shape: {target.shape}")
-            logging.debug(f"stack_tape shape: {stack_tape.shape}")
-            logging.debug(f"attachment_labels shape: {attachment_labels.shape}")
             # 3.3.2 forward
-            
             loss_w, loss_a = model.forward(
                 data,
                 target,
                 stack_tape,
                 attachment_labels,
             ) # summed loss
+            loss_w = loss_w.sum()
+            loss_a = loss_a.sum()
+            # back to cpu
+            
             
             # if nan then raise
-            if torch.isnan(loss_w).any() or torch.isnan(loss_a).any():
-                raise ValueError("Loss is NaN")
+            # if torch.isnan(loss_w).any() or torch.isnan(loss_a).any():
+            #     raise ValueError("Loss is NaN")
             
             loss = (loss_w + train_args.attachment_ratio * loss_a) / (1 + train_args.attachment_ratio)
-            
             # 3.3.3 backward
-            loss = loss / train_args.gradient_accumulation_steps
-            loss.backward() # NOTE: WE DON'T NEED TO DIVIDE BY SUM OF LENGTHS IN BACKWARD otherwise the scale <<1
+            # divide by grad_accumulation_steps
+            # in place
             
+            # FIXME: if we want to the sum of a whole batch (batch_size * grad_accumulation_steps), this division is not needed
+            # loss.div_(train_args.gradient_accumulation_steps)
+            
+            # def print_grad_memory(model):
+            #     total_bytes = 0
+            #     for name, param in model.named_parameters():
+            #         if param.grad is not None:
+            #             param_bytes = param.grad.detach().numel() * param.grad.detach().element_size()
+            #             total_bytes += param_bytes
+            #             # print(f"{name}: {param.grad.numel()} elements, {param_bytes / (1024**2):.2f} MB")
+            #     print(f"Total gradient memory: {total_bytes / (1024**2):.2f} MB")
+            # print_grad_memory(model)
+            # print(f"Allocated GPU MEMORY: {torch.cuda.memory_allocated() / (1024**2):.2f} MB")
+            # print(f"Reserved GPU MEMORY: {torch.cuda.memory_reserved() / (1024**2):.2f} MB")
+            torch.cuda.empty_cache()
+            # print(loss.sum())
+            loss.backward() # NOTE: WE DON'T NEED TO DIVIDE BY SUM OF LENGTHS IN BACKWARD otherwise the scale <<1
             
             # 3.3.4 clip grad norm
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_args.max_grad_norm)
-            
+            torch.cuda.empty_cache()
             # 3.3.5 step
             if (general_step + 1) % train_args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                
+            
+            # 3.3.6 detach forward inputs and move back to cpu
+            data = data.detach().cpu()
+            target = target.detach().cpu()
+            stack_tape = stack_tape.detach().cpu()
+            attachment_labels = attachment_labels.detach().cpu()
+            del target, data, stack_tape, attachment_labels
+            # 3.3.7 eval & log
             # print
-            if (general_step + 1) % train_args.log_interval == 0:
-                sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
-                logging.info("=" * 100)
-                logging.info(f"Epoch: {epoch}, Step: {step}, Global Step (+1): {general_step + 1},")
-                # Loss Sum: {loss.item()}, Loss Word: {loss_w.item()}, Loss Attachment: {loss_a.item()},
-                logging.info(f"Loss Word for PPL: {loss_w.item() / sum_of_seq_lengths_item}, Loss Attachment for PPL: {loss_a.item() / sum_of_seq_lengths_item}")
-                logging.info(f"Loss for PPL: {loss.item() / sum_of_seq_lengths_item}, LR: {scheduler.get_last_lr()[0]}")
-                logging.info(f"PPL this time: {torch.exp(torch.tensor(loss.item() / sum_of_seq_lengths_item))}")
-                wandb.log({
-                    "train_loss": loss.item() / sum_of_seq_lengths_item,
-                    "train_loss_word": loss_w.item() / sum_of_seq_lengths_item,
-                    "train_loss_attachment": loss_a.item() / sum_of_seq_lengths_item,
-                    "train_ppl": torch.exp(torch.tensor(loss.item() / sum_of_seq_lengths_item)).item(),
-                    "epoch": epoch,
-                    "step": step,
-                    "global_step": general_step + 1,
-                })
-            # eval w/ dev set
-            # if best then save
-            if (general_step + 1) % train_args.eval_interval == 0:
-                logging.info("=" * 100)
-                logging.info(f"Eval at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
-                with torch.no_grad():
+            # torch.set_grad_enabled(False)
+            loss_w = loss_w.detach().cpu()
+            loss_a = loss_a.detach().cpu()
+            loss = loss.detach().cpu()
+            
+            # no need grad from now on
+            with torch.no_grad():
+                if (general_step + 1) % train_args.log_interval == 0:
+                    sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
+                    logging.info("=" * 100)
+                    logging.info(f"Epoch: {epoch}, Step: {step}, Global Step (+1): {general_step + 1},")
+                    # Loss Sum: {loss.item()}, Loss Word: {loss_w.item()}, Loss Attachment: {loss_a.item()},
+                    logging.info(f"Loss Word for PPL: {loss_w.item() / sum_of_seq_lengths_item}, Loss Attachment for PPL: {loss_a.item() / sum_of_seq_lengths_item}")
+                    logging.info(f"Loss weighted: {loss.item() / sum_of_seq_lengths_item}, LR: {scheduler.get_last_lr()[0]}")
+                    logging.info(f"PPL this time: {torch.exp(torch.tensor((loss_w + loss_a).item() / sum_of_seq_lengths_item))}")
+                    wandb.log({
+                        "train_loss": loss.item() / sum_of_seq_lengths_item,
+                        "train_loss_word": loss_w.item() / sum_of_seq_lengths_item,
+                        "train_loss_attachment": loss_a.item() / sum_of_seq_lengths_item,
+                        "train_ppl": torch.exp(torch.tensor((loss_w + loss_a).item() / sum_of_seq_lengths_item)),
+                        "epoch": epoch,
+                        "step": step,
+                        "global_step": general_step + 1,
+                    })
+                del loss, loss_w, loss_a
+                # eval w/ dev set
+                # if best then save
+                if (general_step + 1) % train_args.eval_interval == 0:
+                    logging.info("=" * 100)
+                    logging.info(f"Eval at Epoch: {epoch}, Step: {step}, Global step (+1): {general_step + 1}")
+                    # with torch.no_grad():
                     model.eval()
                     eval_losses_w = []
                     eval_losses_a = []
                     n_words = 0
                     for step, batch in enumerate(dev_dataloader):
-                        ids = batch["ids"].to(device)
-                        ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id).to(device), ids], dim=1)
-                        target = ids[:, 1:]
-                        data = ids[:, :-1]
+                        ids = batch["ids"]
+                        ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id), ids], dim=1)
+                        target = ids[:, 1:].to(device)
+                        data = ids[:, :-1].to(device)
                         stack_tape = batch["stack_tape"].to(device)
                         attachment_labels = batch["attachment_labels"].to(device)
                         # forward
@@ -321,7 +355,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                             stack_tape,
                             attachment_labels,
                         )
-        
+                        data, target, stack_tape, attachment_labels = data.detach().cpu(), target.detach().cpu(), stack_tape.detach().cpu(), attachment_labels.detach().cpu()
+                        loss_w = loss_w.detach().cpu().sum()
+                        loss_a = loss_a.detach().cpu().sum()
                         eval_losses_w.append(loss_w.item())
                         eval_losses_a.append(loss_a.item())
                         n_words += torch.sum(batch["lengths"]).item()
@@ -372,7 +408,9 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         "global_step": general_step + 1,
                     })
                 # logging.info("=" * 100)
-                
+                torch.cuda.empty_cache()
+            # torch.set_grad_enabled(True)    
+            gc.collect()
         
         # save model
         logging.info("=" * 100)
@@ -417,7 +455,7 @@ if __name__ == '__main__':
     print("-" * 100)
     print("Parallel Args:")
     pprint(asdict(parallel_args))
-    print("=" * 100)
+    # print("=" * 100)
     # exit()
     
     # do wandb
