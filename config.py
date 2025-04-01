@@ -14,7 +14,7 @@ class ModelConfig:
     eos_id: int = 2
     stack_pad_id: int = -100
     pre_lnorm: bool = False
-    max_stack_depth: int = 50
+    max_stack_depth: int = 150
     
     
 @dataclass
@@ -38,7 +38,7 @@ class DebugParallelConfig:
 
 @dataclass
 class TrainConfig:
-    run_name = "push_bllip_con_test"
+    run_name = "push_bllip_con_test_gas2"
     
     seed: int = 12345
     proposed_batch_size: int = 64 # 64?
@@ -59,7 +59,7 @@ class TrainConfig:
     
     max_grad_norm: float = 3.0
     # GAS
-    gradient_accumulation_steps: int = 8 # grad_accumulation_steps * real_batch_size = 64
+    gradient_accumulation_steps: int = 2 # grad_accumulation_steps * real_batch_size = 64
     log_interval: int = 100 # debug: 1, normal: 100
     eval_interval: int = 1000 # debug: 1, normal: 1000
     

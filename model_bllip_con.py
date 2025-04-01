@@ -217,7 +217,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             return output
 
 class PushdownMultiHeadAttn(nn.Module):
-    def __init__(self, n_head, d_model, d_head, dropout, pre_lnorm=False, max_stack_depth=50):
+    def __init__(self, n_head, d_model, d_head, dropout, pre_lnorm=False, max_stack_depth=150):
         super(PushdownMultiHeadAttn, self).__init__()
         self.n_head = n_head # n_heads | n_head
         self.d_model = d_model # state_size | n_embd
@@ -280,7 +280,7 @@ class PushdownMultiHeadAttn(nn.Module):
         # T': mems length | klen (we assume this to be stack_tape length)
         # C: state size | d_model
         
-        if mems is not None:
+        if mems or past_keys or past_values or cache:
             raise NotImplementedError("We ignore TXL mems for now.")
         else:
             if self.pre_lnorm:
@@ -339,6 +339,7 @@ class PushdownMultiHeadAttn(nn.Module):
             # 2.1 Compute the table from which AC_depth gathers
             
             # d_emb_table: shape [bsz, max_stack_depth, n_head*d_head]
+            stack_tape.clamp_(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
             d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, n_head*d_head]
             
             # Moderate_wk in main branch [max_stack_depth, n_head, d_head] = [max_stack_depth, n_head, head_dim]
@@ -364,6 +365,7 @@ class PushdownMultiHeadAttn(nn.Module):
             attn_score.mul_(self.scale)
         else:
             # stack_tape: [bsz, qlen, klen] = [B, T, T'], stack_tape[b][i][j] -> d_{i,j} in batch b
+            stack_tape.clamp_(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
             depth_emb = self.beta(stack_tape.int()) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
             # _, depth_emb, _ = self.qkv_net(depth_emb).chunk(3, dim=-1) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
             # d_{i,j} in batch b is depth_emb[b][i][j]
@@ -388,12 +390,23 @@ class PushdownMultiHeadAttn(nn.Module):
             # [qlen x klen x bsz x n_head]
             attn_score = AC + BD
             attn_score.mul_(self.scale)
-        
-        if attn_mask is not None and attn_mask.any().item():
-            if attn_mask.dim() == 2:
-                attn_score.masked_fill_(attn_mask[None,:,:,None], -float('inf'))
-            elif attn_mask.dim() == 3:
-                attn_score.masked_fill_(attn_mask[:,:,:,None], -float('inf'))
+        try:
+            if attn_mask is not None and attn_mask.any().item():
+                if attn_mask.dim() == 2:
+                    attn_score.masked_fill_(attn_mask[None,:,:,None], -float('inf'))
+                elif attn_mask.dim() == 3:
+                    attn_score.masked_fill_(attn_mask[:,:,:,None], -float('inf'))
+        except Exception as e:
+            # print shapes
+            print("attn_score: ", attn_score.shape)
+            print("attn_mask: ", attn_mask.shape)
+            print("w: ", w.shape)
+            print("r: ", r.shape)
+            print("r_w_bias: ", r_w_bias.shape)
+            print("r_r_bias: ", r_r_bias.shape)
+            print("stack_tape: ", stack_tape.shape)
+            raise e
+            
 
         # [qlen x klen x bsz x n_head]
         attn_prob = F.softmax(attn_score, dim=1)
@@ -498,7 +511,7 @@ class AttachmentHead(nn.Module):
       - 返回形状为 (B, T, T+1) 的 attachment logits（经过因果 mask 后）
     """
 
-    def __init__(self, d_model, depth_embd_dim, max_depth=50, dropout=0.1):
+    def __init__(self, d_model, depth_embd_dim, max_depth=150, dropout=0.1):
         super(AttachmentHead, self).__init__()
         self.d_model = d_model # also for word emb
         self.depth_embd_dim = depth_embd_dim # dim of the embedding of words
@@ -578,11 +591,14 @@ class AttachmentHead(nn.Module):
         if False:
             # TODO: gather to save gpu memory, 
             # TODO: but need to separate key_and_stack_mlp
+            stack_tape.clamp_(0, self.max_stack_depth - 1)
             d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, embd_dim]
             tabled_stack_info = d_emb_table.view(self.max_stack_depth, self.depth_embd_dim) # shape [max_stack_depth, embd_dim]
         else:
             # Compute the depth emb. 
             # stack_tape (B, T, T') -> (B, T, T', embd_dim=D)
+            # clip stack_tape to [0, max_stack_depth-1]
+            stack_tape.clamp_(0, self.max_stack_depth - 1)
             depth_emb = self.beta(stack_tape.int())
             stack_tape = stack_tape.detach().cpu()
             # concatenate k and depth_emb
@@ -699,7 +715,7 @@ class PushdownTransformerConstituency(nn.Module):
                  eos_id = 2,
                  stack_pad_id = -100,
                  pre_lnorm = False,
-                 max_stack_depth = 50
+                 max_stack_depth = 150
                  ):
         super(PushdownTransformerConstituency, self).__init__()
         self.vocab_size = vocab_size

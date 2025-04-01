@@ -17,6 +17,7 @@ Dataset/
 __pycache__
 p.py
 d.py
+d_probe.py
 data/
 *.log
 ckpt/
