@@ -70,6 +70,9 @@ parser.add_argument('--beta', default=0.1, type=float)
 parser.add_argument('--rel_type', default="degree", type=str)
 parser.add_argument('--eval_type', default="normal", type=str)
 parser.add_argument('--sampling_num', default=0, type=int)
+parser.add_argument('--degree_len', default=400, type=int)
+parser.add_argument('--distance_len', default=400, type=int)
+parser.add_argument('--depth_len', default=224, type=int)
 
 biaffine_hidden = 2048
 
@@ -116,7 +119,7 @@ def get_span(hidden, index_to_id, idx):
     return span_hidden/span_len , position 
 
 
-def hidden_alignment(hidden, sents_index_to_id):
+def argument_alignment(hidden, sents_index_to_id):
     batch_words_input = []
     for sent_hidden, sent_index_to_id in zip(hidden, sents_index_to_id):
         words_input = []
@@ -138,6 +141,22 @@ def hidden_alignment(hidden, sents_index_to_id):
                 word_input = sent_hidden[j]
             temp_index_id = sent_index_to_id[j]
         words_input.append(word_input/temp_len)
+        batch_words_input.append(words_input)
+    return batch_words_input
+
+
+def predicate_alignment(hidden, sents_index_to_id, word_emb):    # for predicates
+    batch_words_input = []
+    for sent_hidden, sent_index_to_id, sent_word_emb in zip(hidden, sents_index_to_id, word_emb):
+        words_input = []
+        for j in range(len(sent_index_to_id) - 1):
+            # if sent_index_to_id[j] <= 0:
+            #     continue
+            # if len(words_input) + 1 == sent_index_to_id[j]:
+            #     words_input.append(sent_hidden[j])
+            if len(words_input) + 1 == sent_index_to_id[j + 1]:  # j + 1 is new word
+                words_input.append(torch.concat((sent_hidden[j], sent_word_emb[j + 1]), dim = 0))
+            
         batch_words_input.append(words_input)
     return batch_words_input
 
@@ -296,7 +315,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             # sents[0][-30:]=[0]*30
             # sents[0][-30]=2
             # The Blair & Co. is close to an agreement to sell its TV station advertising representation operation and program production unit to an investor group led by James H. Rosenfield , a former CBS Inc. executive , industry sources said .
-            ret, hidden = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
+            ret, hidden, word_emb = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, 
                         sents_arrow=[sents_left_arrow, sents_right_arrow], iseval=True, rel_type=args.rel_type)
 
@@ -304,7 +323,9 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                 total_loss += ret.sum().item()
                 num_words += total_length
             hidden = hidden.transpose(0, 1)
-            batch_words_input = hidden_alignment(hidden, sents_index_to_id)
+            word_emb = word_emb.transpose(0, 1)
+            batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
+            batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
             biaffine_loss = 0
             batch_input1 = []
             batch_input2 = []
@@ -312,12 +333,12 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             batch_right_labels = []
             batch_mask = []
             if [left_arrow, right_arrow]:
-                for i, (sent_ids, sent_hidden, sent_index_to_id, words_input, sent_left_label, sent_right_label) in enumerate(zip(
-                    sents, hidden, sents_index_to_id, batch_words_input, sents_left_arrow, sents_right_arrow)):
+                for i, (sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label) in enumerate(zip(
+                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow)):
                     sent_biaffine_loss = 0
                     input1 = []
                     max_word_length = max(sent_index_to_id)
-                    words_piece_input = torch.stack(words_input)
+                    words_piece_input = torch.stack(arguments_input)
                     input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
                     left_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
                     right_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
@@ -326,7 +347,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                     for j in range(len(sent_ids)):
                         if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
                             words_index = sent_index_to_id[j]
-                            predicate_input = words_input[words_index - 1]
+                            predicate_input = predicates_input[words_index - 1]
 
                             left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
                             right_gt = sent_right_label[words_index - 1]
@@ -543,7 +564,8 @@ def main(args):
     if args.model_file == '':
         model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
-                                   eos_id, left_arc, right_arc, pop_root, startofword_id, args.pre_lnorm)
+                                   eos_id, left_arc, right_arc, pop_root, startofword_id, args.pre_lnorm,
+                                   args.rel_type, args.degree_len, args.distance_len, args.depth_len)
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
         model.apply(weights_init)
         fan_in = nn.init._calculate_correct_fan(model.emb.weight, 'fan_in')
@@ -567,6 +589,9 @@ def main(args):
     model.eval()
     left_biaffine_model.eval()
     right_biaffine_model.eval()
+
+    left_biaffine_model.set_temperature(1.0)
+    right_biaffine_model.set_temperature(1.0)
 
     if args.eval_type != "estimate":
         logger.info(f"------")

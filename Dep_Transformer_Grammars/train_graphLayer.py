@@ -74,6 +74,9 @@ parser.add_argument('--dataset', default="default", type=str)
 parser.add_argument('--rel_type', default="degree", type=str)
 parser.add_argument('--stage_two', default=False, action='store_true')
 parser.add_argument('--smoothlabel', default=False, action='store_true')
+parser.add_argument('--degree_len', default=400, type=int)
+parser.add_argument('--distance_len', default=400, type=int)
+parser.add_argument('--depth_len', default=224, type=int)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -263,7 +266,22 @@ def get_span(hidden, index_to_id, idx):
     return span_hidden/span_len , position 
     #span_hidden/span_len/2 + hidden[arc_pos]/2  (span_hidden + hidden[arc_pos])/(span_len + 1)
 
-def hidden_alignment(hidden, sents_index_to_id):
+def predicate_alignment(hidden, sents_index_to_id, word_emb):    # for predicates
+    batch_words_input = []
+    for sent_hidden, sent_index_to_id, sent_word_emb in zip(hidden, sents_index_to_id, word_emb):
+        words_input = []
+        for j in range(len(sent_index_to_id) - 1):
+            # if sent_index_to_id[j] <= 0:
+            #     continue
+            # if len(words_input) + 1 == sent_index_to_id[j]:
+            #     words_input.append(sent_hidden[j])
+            if len(words_input) + 1 == sent_index_to_id[j + 1]:  # j + 1 is new word
+                words_input.append(torch.concat((sent_hidden[j], sent_word_emb[j + 1]), dim = 0))
+            
+        batch_words_input.append(words_input)
+    return batch_words_input
+
+def argument_alignment(hidden, sents_index_to_id):    # arguments
     batch_words_input = []
     for sent_hidden, sent_index_to_id in zip(hidden, sents_index_to_id):
         words_input = []
@@ -297,6 +315,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     acc_num = 0
     infer_num = 0
     label_num = 0
+    epsilon = 1e-323
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -308,78 +327,113 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             total_length = sum([len(sent) - 1 for sent in sents])
             mems = tuple()
             
-            ret, hidden = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
+            ret, hidden, word_emb = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
                         sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
-            hidden = hidden.transpose(0, 1) # change
-            batch_words_input = hidden_alignment(hidden, sents_index_to_id)
+            hidden = hidden.transpose(0, 1) # non_biaffine
+            word_emb = word_emb.transpose(0, 1)
+            batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
+            batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
             if [left_arrow, right_arrow]:
-                for sent_ids, sent_hidden, sent_index_to_id, words_input, sent_left_label, sent_right_label in zip(
-                    sents, hidden, sents_index_to_id, batch_words_input, sents_left_arrow, sents_right_arrow):
+                for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label in zip(
+                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow):
+                    sent_biaffine_loss = 0
+                    input1 = []
                     max_word_length = max(sent_index_to_id)
-                    words_piece_input = torch.stack(words_input)
+                    words_piece_input = torch.stack(arguments_input)
+                    input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
+                    left_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
+                    right_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
                     for j in range(len(sent_ids)):
                         if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
-                            # predicate_input, words_index = get_span(sent_hidden, sent_index_to_id, j)
                             words_index = sent_index_to_id[j]
-                            predicate_input = words_input[words_index - 1]
-                            # if torch.cuda.is_available():
-                            #     words_piece_input = torch.stack([torch.zeros(args.w_dim).cuda()] + words_input[:words_index])
-                            # else:
-                            #     words_piece_input = torch.stack([torch.zeros(args.w_dim)] + words_input[:words_index])
-                            # if words_index != 1:
-                            #     words_piece_input = torch.stack(words_input[:words_index - 1])
-                            # else:
-                            #     words_piece_input = torch.Tensor([[]]).to(device)
-                            left_logits = left_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input[:words_index - 1].view(1, -1, biaffine_hidden)).squeeze()
-                            right_logits = right_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input[:words_index - 1].view(1, -1, biaffine_hidden)).squeeze()
-                            if left_logits.dim() == 0:
-                                left_logits = left_logits.unsqueeze(0)
-                                right_logits = right_logits.unsqueeze(0)
-                            left_pred = torch.where(left_logits > 0.5)  # start from 0, 0 means root, word start from 1
-                            right_pred = torch.where(right_logits > 0.5)
+                            predicate_input = predicates_input[words_index - 1]
+                            # left_logits = left_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input[:words_index - 1].view(1, -1, biaffine_hidden)).squeeze()
+                            # right_logits = right_biaffine_model(predicate_input.view(1, 1, -1), words_piece_input[:words_index - 1].view(1, -1, biaffine_hidden)).squeeze()
+                            # if left_logits.dim() == 0:
+                            #     left_logits = left_logits.unsqueeze(0)
+                            #     right_logits = right_logits.unsqueeze(0)
+                            # left_pred = torch.where(left_logits > 0.5)  # start from 0, 0 means root, word start from 1
+                            # right_pred = torch.where(right_logits > 0.5)
                             
                             left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
                             right_gt = sent_right_label[words_index - 1]
+                            
+                            input1.append(predicate_input.view(1, -1))
 
                             if left_gt:
-                                label_num += len(left_gt)
+                                left_labels[words_index - 1][left_gt] = 1
                             if right_gt:
-                                label_num += len(right_gt)
-                            
-                            infer_num += len(left_pred[0]) + len(right_pred[0])
+                                right_labels[words_index - 1][right_gt] = 1
 
-                            if left_pred:
-                                for l in left_pred[0]:
-                                    if l.item() in left_gt:
-                                        acc_num += 1
-                            if right_pred:
-                                for r in right_pred[0]:
-                                    if r.item() in right_gt:
-                                        acc_num += 1
-                            epsilon = 1e-323
-                            if not left_gt:
-                                left_gt = list(range(words_index))
-                                biaffine_loss -= torch.sum(torch.log(1-left_logits[left_gt] + epsilon)).item()
-                            else:
-                                biaffine_loss -= torch.sum(torch.log(left_logits[left_gt] + epsilon)).item()
-                                other_position = [i for i in range(words_index) if i not in left_gt]
-                                biaffine_loss -= torch.sum(torch.log(1-left_logits[other_position] + epsilon)).item()
+                            # if left_gt:
+                            #     label_num += len(left_gt)
+                            # if right_gt:
+                            #     label_num += len(right_gt)
                             
-                            if not right_gt:
-                                right_gt = list(range(words_index))
-                                biaffine_loss -= torch.sum(torch.log(1-right_logits[right_gt] + epsilon)).item()
-                            else:
-                                biaffine_loss -= torch.sum(torch.log(right_logits[right_gt] + epsilon)).item()
-                                other_position = [i for i in range(words_index) if i not in right_gt]
-                                biaffine_loss -= torch.sum(torch.log(1-right_logits[other_position] + epsilon)).item()
+                            # infer_num += len(left_pred[0]) + len(right_pred[0])
 
+                            # if left_pred:
+                            #     for l in left_pred[0]:
+                            #         if l.item() in left_gt:
+                            #             acc_num += 1
+                            # if right_pred:
+                            #     for r in right_pred[0]:
+                            #         if r.item() in right_gt:
+                            #             acc_num += 1
+                            # if not left_gt:
+                            #     left_gt = list(range(words_index))
+                            #     biaffine_loss -= torch.sum(torch.log(1-left_logits[left_gt] + epsilon)).item()
+                            # else:
+                            #     biaffine_loss -= torch.sum(torch.log(left_logits[left_gt] + epsilon)).item()
+                            #     other_position = [i for i in range(words_index) if i not in left_gt]
+                            #     biaffine_loss -= torch.sum(torch.log(1-left_logits[other_position] + epsilon)).item()
+                            
+                            # if not right_gt:
+                            #     right_gt = list(range(words_index))
+                            #     biaffine_loss -= torch.sum(torch.log(1-right_logits[right_gt] + epsilon)).item()
+                            # else:
+                            #     biaffine_loss -= torch.sum(torch.log(right_logits[right_gt] + epsilon)).item()
+                            #     other_position = [i for i in range(words_index) if i not in right_gt]
+                            #     biaffine_loss -= torch.sum(torch.log(1-right_logits[other_position] + epsilon)).item()
+                
+                    if input1:
+                        input1 = torch.stack(input1)
+                        mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:].to(input1.device)
+
+                        inv_left_labels = mask - left_labels
+                        inv_right_labels = mask - right_labels
+                        left_logits = left_biaffine_model(input1, input2).squeeze()
+                        right_logits = right_biaffine_model(input1, input2).squeeze()
+                        sent_biaffine_loss += - torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels)) - torch.sum(torch.log(left_logits.mul(left_labels) + epsilon).mul(left_labels))
+                        sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
+                        
+                        left_pred = torch.nonzero(left_logits*mask > 0.5, as_tuple=False)  # start from 0, 0 means root, word start from 1
+                        right_pred = torch.nonzero(right_logits*mask > 0.5, as_tuple=False) 
+                        left_label_nonzero = torch.nonzero(left_labels, as_tuple=False)
+                        right_label_nonzero = torch.nonzero(right_labels, as_tuple=False)
+
+                        label_num += len(left_label_nonzero)
+                        label_num += len(right_label_nonzero)
+                        
+                        infer_num += len(left_pred) + len(right_pred)
+
+                        for pred_row in left_pred:
+                            for label_row in left_label_nonzero:
+                                if torch.equal(pred_row, label_row):
+                                    acc_num += 1
+                        for pred_row in right_pred:
+                            for label_row in right_label_nonzero:
+                                if torch.equal(pred_row, label_row):
+                                    acc_num += 1
+                        
+                        biaffine_loss += sent_biaffine_loss.item()
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
 
     ppl = np.exp(total_loss / num_words) 
-    biaffine_ppl = np.exp((biaffine_loss + total_loss) / num_words)
+    biaffine_ppl = np.exp((biaffine_loss + total_loss) / num_words) # biaffineonly
     logger = get_logger()
     if infer_num == 0:
         f_1 = 0
@@ -463,7 +517,8 @@ def main(args):
     if args.model_file == '':
         model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
-                                   eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id, args.pre_lnorm)
+                                   eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
+                                   args.pre_lnorm, args.rel_type, args.degree_len, args.distance_len, args.depth_len)
         left_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, type="Multi")
         right_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, type="Multi")
         logger.info(f"Transformer parameter counts: {sum(p.numel() for p in model.parameters())}")
@@ -594,10 +649,12 @@ def main(args):
     # slope = (log_end - log_start) / total_steps
     # BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps)]
 
-    log_start = np.log(0.01) # change
+    log_start = np.log(0.01) # non_biaffine
     log_end = np.log(5)
     slope = (log_end - log_start) / total_steps * 2
     BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps // 2)] + [np.exp(log_end - slope * step) for step in range(total_steps // 2 + 1)]
+
+    temperature_decay = [2 - i * (1 / (total_steps // 3 * 2))for i in range(total_steps // 3 * 2)] + [1 for i in range(total_steps - total_steps // 3 * 2)]
     
     if args.stage_two:
         checkpoint_step = (args.num_epochs - 1) * len(train_data)
@@ -658,23 +715,25 @@ def main(args):
             # with torch.no_grad():
             #     ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
             #             args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
-            ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
+            ret, hidden, word_emb = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
                         sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
 
-            if not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1): # change
+            if not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1): # non_biaffine
                 hidden = hidden.transpose(0, 1)
-                batch_words_input = hidden_alignment(hidden, sents_index_to_id)
+                word_emb = word_emb.transpose(0, 1)
+                batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
+                batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
 
                 biaffine_loss = []
                 # max_length = max([len(sent) for sent in sents])
                 # max_word_length = max(max(item) for item in sents_index_to_id) + 1
                 if [sents_left_arrow, sents_right_arrow]:
-                    for sent_ids, sent_hidden, sent_index_to_id, words_input, sent_left_label, sent_right_label in zip(
-                        sents, hidden, sents_index_to_id, batch_words_input, sents_left_arrow, sents_right_arrow):
+                    for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label in zip(
+                        sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow):
                         input1 = []
                         max_word_length = max(sent_index_to_id)
-                        words_piece_input = torch.stack(words_input)
+                        words_piece_input = torch.stack(arguments_input)
                         input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
                         left_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
                         right_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
@@ -683,7 +742,7 @@ def main(args):
                                 # predicate_input, words_index = get_span(sent_hidden, sent_index_to_id, j)
                                 words_index = sent_index_to_id[j]
                                 words_index -= 1
-                                predicate_input = words_input[words_index]
+                                predicate_input = predicates_input[words_index]
                                 input1.append(predicate_input.view(1, -1))
 
                                 if sent_left_label[words_index]:
@@ -709,7 +768,7 @@ def main(args):
             # else:
             # print(f"Biaffine forwarding takes {time.time()-biaffine_start:.2f} seconds")
             raw_loss = ret
-            if not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1): # change
+            if not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1): # non_biaffine
                 raw_biaffine_loss = torch.stack(biaffine_loss)
                 # loss = 1 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
                 loss = 1 * (1/(1+BTloss_ratio_list[train_step]) * raw_loss.mean() + BTloss_ratio_list[train_step]/(1+BTloss_ratio_list[train_step]) * raw_biaffine_loss.mean())
@@ -717,6 +776,9 @@ def main(args):
             else:
                 loss = raw_loss.mean()
             train_loss += raw_loss.sum().item()
+            # raw_biaffine_loss = torch.stack(biaffine_loss) # biaffineonly
+            # loss = raw_biaffine_loss.mean()
+            # train_loss += raw_biaffine_loss.sum().item()
 
             loss.backward()
            
@@ -745,6 +807,8 @@ def main(args):
             optimizer.step()
             left_biaffine_optimizer.step()
             right_biaffine_optimizer.step()
+            left_biaffine_model.set_temperature(temperature_decay[train_step])
+            right_biaffine_model.set_temperature(temperature_decay[train_step])
             train_step += 1
             if args.scheduler == 'const':
                 pass

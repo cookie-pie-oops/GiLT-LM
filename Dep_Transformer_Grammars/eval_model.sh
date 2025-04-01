@@ -2,9 +2,9 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_degree_DTG_concat_smallerproj_AC_sampling.out
+#SBATCH --output=graphlayer_small_psd_4_mixing_DTG_mlpdot_firsttoken_correctrel_decaytemp2_arugments_pushdown_sampling.out
 export DATASET=psd
-export RELTYPE=degree
+export RELTYPE=mixing
 export EVALTYPE=estimate    #estimate
 
  # don't need sampling dev
@@ -16,7 +16,7 @@ python eval_model.py \
     --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow_300.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_$DATASET\_4_1:0.8_$RELTYPE\_DTG_concat_smallerproj_AC.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:0.8_$RELTYPE\_DTG_mlpdot_firsttoken_correctrel_decaytemp2_arugments_pushdown.pt \
     --eval_type $EVALTYPE \
     --sampling_num 300 \
     --eval_batch_size 100 \
