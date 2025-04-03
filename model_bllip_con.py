@@ -44,7 +44,7 @@ class PositionwiseFF(nn.Module):
         self.dropout = dropout
 
         self.CoreNet = nn.Sequential(
-            nn.Linear(d_model, d_inner), nn.ReLU(inplace=True),
+            nn.Linear(d_model, d_inner), nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_inner, d_model),
             nn.Dropout(dropout),
@@ -339,7 +339,7 @@ class PushdownMultiHeadAttn(nn.Module):
             # 2.1 Compute the table from which AC_depth gathers
             
             # d_emb_table: shape [bsz, max_stack_depth, n_head*d_head]
-            stack_tape.clamp_(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
+            stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
             d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, n_head*d_head]
             
             # Moderate_wk in main branch [max_stack_depth, n_head, d_head] = [max_stack_depth, n_head, head_dim]
@@ -365,7 +365,7 @@ class PushdownMultiHeadAttn(nn.Module):
             attn_score.mul_(self.scale)
         else:
             # stack_tape: [bsz, qlen, klen] = [B, T, T'], stack_tape[b][i][j] -> d_{i,j} in batch b
-            stack_tape.clamp_(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
+            stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
             depth_emb = self.beta(stack_tape.int()) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
             # _, depth_emb, _ = self.qkv_net(depth_emb).chunk(3, dim=-1) # shape [bsz, qlen, klen, n_head*d_head] = [B, T, T', n_head*head_dim]
             # d_{i,j} in batch b is depth_emb[b][i][j]
@@ -535,14 +535,14 @@ class AttachmentHead(nn.Module):
         if dropout == 0:
             self.key_and_stack_mlp = nn.Sequential( # intermediate 0 (input): k & depth_embed == (B, T, T', 2*d_model + depth_embd_dim)
                 nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model + depth_embd_dim), # intermediate 1: still k & depth_embed: (B, T, T', 2*d_model + depth_embd_dim)
-                nn.ReLU(inplace=True), # intermediate 2: k & depth_embed: (B, T, T', 2*d_model + depth_embd_dim)
+                nn.ReLU(), # intermediate 2: k & depth_embed: (B, T, T', 2*d_model + depth_embd_dim)
                 # nn.Dropout(p=dropout), # NOTE: we don't need dropout here for saving memory
                 nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model), # intermediate 3 (out): k & depth_embed == (B, T, T', 2*d_model)
             )
         else:
             self.key_and_stack_mlp = nn.Sequential(
                 nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model + depth_embd_dim),
-                nn.ReLU(inplace=True),
+                nn.ReLU(),
                 nn.Dropout(p=dropout),
                 nn.Linear(2 * d_model + depth_embd_dim, 2 * d_model),
             )
@@ -591,14 +591,14 @@ class AttachmentHead(nn.Module):
         if False:
             # TODO: gather to save gpu memory, 
             # TODO: but need to separate key_and_stack_mlp
-            stack_tape.clamp_(0, self.max_stack_depth - 1)
+            stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1)
             d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, embd_dim]
             tabled_stack_info = d_emb_table.view(self.max_stack_depth, self.depth_embd_dim) # shape [max_stack_depth, embd_dim]
         else:
             # Compute the depth emb. 
             # stack_tape (B, T, T') -> (B, T, T', embd_dim=D)
             # clip stack_tape to [0, max_stack_depth-1]
-            stack_tape.clamp_(0, self.max_stack_depth - 1)
+            stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1)
             depth_emb = self.beta(stack_tape.int())
             stack_tape = stack_tape.detach().cpu()
             # concatenate k and depth_emb
