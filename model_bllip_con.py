@@ -780,8 +780,8 @@ class PushdownTransformerConstituency(nn.Module):
                 mems=None, 
                 return_h=False):
         
-        # data: x, shape [T, B], ids of tokens seq[:T] where len(seq) = T+1
-        # target: y = seq[1:T+1], shape [T, B], ids of tokens seq[1:T+1]
+        # data: x, shape [B, T], ids of tokens seq[:T] where len(seq) = T+1
+        # target: y = seq[1:T+1], shape [B, T], ids of tokens seq[1:T+1]
         # T+1: real length of seq, 
         # B: batch size
         # mems: None for now
@@ -793,8 +793,8 @@ class PushdownTransformerConstituency(nn.Module):
         if mems is not None:
             raise NotImplementedError("We ignore TXL mems for now.")
         # try transpose WITHIN the forward to let DataParallel be able to work
-        data = data.transpose(0, 1)
-        target = target.transpose(0, 1)
+        data = data.transpose(0, 1) # [B, T] -> [T, B]
+        target = target.transpose(0, 1) # [B, T] -> [T, B]
         # print(data, target)
         qlen, bsz = data.size()
         mlen = 0 if mems is None else mems[0].size(0)
@@ -880,4 +880,55 @@ class PushdownTransformerConstituency(nn.Module):
             return loss_words, loss_attach, core_out
         else:
             return loss_words, loss_attach
+        
+    def take_step_silver_tree(self, 
+                            ids, # shape [qlen+1, bsz]. the real seq is [qlen + 1, bsz] while first is bos and last is eos
+                            stack_tape, # shape [bsz, step, step]
+                            list_reduced, # list of sets of reduced tokens, len = bsz, each set: reduced tokens before -> set as -inf in attach logits
+                            step
+                            ):
+    
+        # NOTE: take step w/ stack tape, and predict a step of attachment while the word seq is given gold
+        # at least the src is [:1] = [0] = bos
+        # final: next_tgt is eos, i.e. [step] is [T]
+        
+        # in step, want to predict the states in step+1
+        # ids: [bsz, qlen+1]
+        # src = ids.transpose(0, 1)[:step+1]
+        # tgt = ids.transpose(0, 1)[step+1]
+        src, next_tgt, tgt = ids.transpose(0, 1)[:step], ids.transpose(0, 1)[step], ids.transpose(0, 1)[1:step+1]
+        
+        word_emb = self.emb(src) # shape [T, B, d_model]
+        pos_seq = torch.arange(src.size(0)-1, -1, -1.0, device=word_emb.device, 
+                                dtype=word_emb.dtype)
+        pos_emb = self.pos_emb(pos_seq)
+        dec_attn_mask = torch.triu(
+            word_emb.new_ones(src.size(0), src.size(0)), diagonal=1).bool()[:,:,None]
+        core_out = self.dropout(word_emb)
+        pos_emb = self.dropout(pos_emb)
+        for layer in self.layers:
+            core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
+                    self.r_r_bias, attn_mask=dec_attn_mask, mems=None)
+        core_out = self.pushdown_final_layer.forward(core_out, pos_emb, self.r_w_bias,
+                    self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
+        core_out = self.dropout(core_out)
+        logits_next_word = self.projection(core_out[-1]) # shape [B, vocab_size]
+        # the logprobs of the next word (in next_tgt)
+        # use gather
+        # next_tgt shape: [B]
+        logprobs_next_word_tgt = torch.gather(logits_next_word, 1, next_tgt.unsqueeze(1)).squeeze(1) # shape [B]
+        
+        # for attachment.
+        next_word = self.emb(tgt)
+        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2))
+        logits_next_attach = attach_logits[:, -1, :].squeeze(1) # shape [B, T+1]
+        # postprocess logits_next_attach
+        for batch_idx, reduced_set in enumerate(list_reduced):
+            for reduced_pos in reduced_set:
+                logits_next_attach[batch_idx, reduced_pos] = -float('inf')
+
+
+        # logprobs_next_word_tgt: the log prob of the next word (exactly that word, not a prob distribution), in a batch
+        # logits_next_attach: the log probS of the next attachment (which IS a prob distribution so we want to SELECT on this), in a batch
+        return logprobs_next_word_tgt, logits_next_attach
     
