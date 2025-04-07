@@ -362,6 +362,8 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                     "lr": scheduler.get_last_lr()[0],
                 }, step=general_step + 1)
                 del loss, loss_w, loss_a, sum_of_seq_lengths_item
+                
+                
                 # also want to log the text to wandb
                 # ids => wandb table
                 # table.add_data(
@@ -393,9 +395,6 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 # logging.info(f"Ids: {list(chain(*[ids[i].tolist() for i in range(ids.shape[0])]))}")
                 # logging.info(f"Attachment labels: {list(chain(*[attachment_labels[i].tolist() for i in range(attachment_labels.shape[0])])) if attachment_labels is not None else []}")
                 del target, data, stack_tape, attachment_labels
-                
-                
-                
                 
                 # eval w/ dev set
                 # if best then save
