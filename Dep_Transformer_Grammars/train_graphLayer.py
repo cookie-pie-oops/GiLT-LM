@@ -74,9 +74,10 @@ parser.add_argument('--dataset', default="default", type=str)
 parser.add_argument('--rel_type', default="degree", type=str)
 parser.add_argument('--stage_two', default=False, action='store_true')
 parser.add_argument('--smoothlabel', default=False, action='store_true')
-parser.add_argument('--degree_len', default=400, type=int)
-parser.add_argument('--distance_len', default=400, type=int)
-parser.add_argument('--depth_len', default=224, type=int)
+parser.add_argument('--degree_len', default=344, type=int)
+parser.add_argument('--distance_len', default=344, type=int)
+parser.add_argument('--depth_len', default=168, type=int)
+parser.add_argument('--predepth_len', default=168, type=int)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -327,7 +328,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             total_length = sum([len(sent) - 1 for sent in sents])
             mems = tuple()
             
-            ret, hidden, word_emb = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
+            ret, hidden, word_emb, attn_relpos_for_pointer = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
                         sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
             hidden = hidden.transpose(0, 1) # non_biaffine
@@ -335,8 +336,8 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
             batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
             if [left_arrow, right_arrow]:
-                for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label in zip(
-                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow):
+                for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label, sent_attn_relpos in zip(
+                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
                     sent_biaffine_loss = 0
                     input1 = []
                     max_word_length = max(sent_index_to_id)
@@ -403,8 +404,8 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
 
                         inv_left_labels = mask - left_labels
                         inv_right_labels = mask - right_labels
-                        left_logits = left_biaffine_model(input1, input2).squeeze()
-                        right_logits = right_biaffine_model(input1, input2).squeeze()
+                        left_logits = left_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
+                        right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
                         sent_biaffine_loss += - torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels)) - torch.sum(torch.log(left_logits.mul(left_labels) + epsilon).mul(left_labels))
                         sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
                         
@@ -518,9 +519,12 @@ def main(args):
         model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
                                    eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
-                                   args.pre_lnorm, args.rel_type, args.degree_len, args.distance_len, args.depth_len)
-        left_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, type="Multi")
-        right_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, type="Multi")
+                                   args.pre_lnorm, args.rel_type, args.degree_len, args.distance_len,
+                                   args.depth_len, args.predepth_len)
+        left_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.distance_len,
+                                   args.depth_len, args.predepth_len), type="Multi")
+        right_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.distance_len,
+                                   args.depth_len, args.predepth_len), type="Multi")
         logger.info(f"Transformer parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in left_biaffine_model.parameters()) * 2}")
         model.apply(weights_init)
@@ -643,16 +647,17 @@ def main(args):
     train_step = 0
     remaining_epoch = 0
 
-    # dynamic learning rate
-    # log_start = np.log(0.01)
-    # log_end = np.log(100)
-    # slope = (log_end - log_start) / total_steps
-    # BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps)]
+    if args.BTloss_ratio == -1:
+        # dynamic learning rate
+        # log_start = np.log(0.01)
+        # log_end = np.log(100)
+        # slope = (log_end - log_start) / total_steps
+        # BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps)]
 
-    log_start = np.log(0.01) # non_biaffine
-    log_end = np.log(5)
-    slope = (log_end - log_start) / total_steps * 2
-    BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps // 2)] + [np.exp(log_end - slope * step) for step in range(total_steps // 2 + 1)]
+        log_start = np.log(0.01) # non_biaffine
+        log_end = np.log(5)
+        slope = (log_end - log_start) / total_steps * 2
+        BTloss_ratio_list = [np.exp(log_start + slope * step) for step in range(total_steps // 2)] + [np.exp(log_end - slope * step) for step in range(total_steps // 2 + 1)]
 
     temperature_decay = [2 - i * (1 / (total_steps // 3 * 2))for i in range(total_steps // 3 * 2)] + [1 for i in range(total_steps - total_steps // 3 * 2)]
     
@@ -702,6 +707,8 @@ def main(args):
             sents_index_to_id = train_index_to_id[i]
             sents_left_arrow = left_train_arrow[i]
             sents_right_arrow = right_train_arrow[i]
+            left_biaffine_model.set_temperature(temperature_decay[train_step])
+            right_biaffine_model.set_temperature(temperature_decay[train_step])
 
             batch_size = len(sents)
             total_length = sum([len(sent) - 1 for sent in sents])
@@ -715,7 +722,7 @@ def main(args):
             # with torch.no_grad():
             #     ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
             #             args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, sents_arrow=sents_arrow)
-            ret, hidden, word_emb = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
+            ret, hidden, word_emb, attn_relpos_for_pointer = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
                         sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
 
@@ -727,19 +734,24 @@ def main(args):
 
                 biaffine_loss = []
                 # max_length = max([len(sent) for sent in sents])
-                # max_word_length = max(max(item) for item in sents_index_to_id) + 1
+                padding_size = max(max(item) for item in sents_index_to_id)
+                total_input1 = []
+                total_input2 = []
+                total_left_labels = []
+                total_right_labels = []
+                total_mask = []
+                total_attn_rel = []
                 if [sents_left_arrow, sents_right_arrow]:
-                    for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label in zip(
-                        sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow):
+                    for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label, attn_rel in zip(
+                        sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
                         input1 = []
                         max_word_length = max(sent_index_to_id)
                         words_piece_input = torch.stack(arguments_input)
                         input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
-                        left_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
-                        right_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
+                        left_labels = torch.zeros(padding_size, padding_size + 1).to(device)
+                        right_labels = torch.zeros(padding_size, padding_size + 1).to(device)
                         for j in range(len(sent_ids)):
                             if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
-                                # predicate_input, words_index = get_span(sent_hidden, sent_index_to_id, j)
                                 words_index = sent_index_to_id[j]
                                 words_index -= 1
                                 predicate_input = predicates_input[words_index]
@@ -753,11 +765,29 @@ def main(args):
                         if input1:
                             input1 = torch.stack(input1)
                             mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:]
+                            input1 = torch.nn.functional.pad(input1, pad=(0, 0, 0, 0, 0, padding_size - input1.shape[-3]))
+                            input2 = torch.nn.functional.pad(input2, pad=(0, 0, 0, padding_size - input2.shape[-2], 0, padding_size - input2.shape[-3]))
+                            mask = torch.nn.functional.pad(mask, pad=(0, padding_size - mask.shape[-1] + 1, 0, padding_size - mask.shape[-2]))
+                            attn_rel = torch.nn.functional.pad(attn_rel, pad=(0, padding_size - attn_rel.shape[-1] + 1, 0, padding_size - attn_rel.shape[-2]))
                             mask = mask.to(device)
-                            left_logits = left_biaffine_model(input1, input2)
-                            right_logits = right_biaffine_model(input1, input2)
-                            loss = (crit(left_logits.squeeze(),left_labels.squeeze().double()) * mask).sum() + (crit(right_logits.squeeze(),right_labels.squeeze().double()) * mask).sum()
-                            biaffine_loss.append(loss / 2) 
+                            total_input1.append(input1)
+                            total_input2.append(input2)
+                            total_left_labels.append(left_labels)
+                            total_right_labels.append(right_labels)
+                            total_mask.append(mask)
+                            total_attn_rel.append(attn_rel)
+                    
+                    total_input1 = torch.stack(total_input1)
+                    total_input2 = torch.stack(total_input2)
+                    total_left_labels = torch.stack(total_left_labels)
+                    total_right_labels = torch.stack(total_right_labels)
+                    total_mask = torch.stack(total_mask)
+                    total_attn_rel = torch.stack(total_attn_rel)
+                    total_attn_rel = total_attn_rel.permute(1, 0, 2, 3)
+                    left_logits = left_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    right_logits = right_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    loss = (crit(left_logits.squeeze(),total_left_labels.squeeze().double()) * total_mask).sum() + (crit(right_logits.squeeze(),total_right_labels.squeeze().double()) * total_mask).sum()
+                    biaffine_loss.append(loss / 2) 
 
             # if args.return_h:
             #     raw_loss, hidden = ret
@@ -770,8 +800,10 @@ def main(args):
             raw_loss = ret
             if not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1): # non_biaffine
                 raw_biaffine_loss = torch.stack(biaffine_loss)
-                # loss = 1 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
-                loss = 1 * (1/(1+BTloss_ratio_list[train_step]) * raw_loss.mean() + BTloss_ratio_list[train_step]/(1+BTloss_ratio_list[train_step]) * raw_biaffine_loss.mean())
+                if args.BTloss_ratio != -1:
+                    loss = 1 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
+                else:   # dynamic -1
+                    loss = 1 * (1/(1+BTloss_ratio_list[train_step]) * raw_loss.mean() + BTloss_ratio_list[train_step]/(1+BTloss_ratio_list[train_step]) * raw_biaffine_loss.mean())
                 train_biaffine_loss += raw_biaffine_loss.sum().item()
             else:
                 loss = raw_loss.mean()
@@ -807,8 +839,6 @@ def main(args):
             optimizer.step()
             left_biaffine_optimizer.step()
             right_biaffine_optimizer.step()
-            left_biaffine_model.set_temperature(temperature_decay[train_step])
-            right_biaffine_model.set_temperature(temperature_decay[train_step])
             train_step += 1
             if args.scheduler == 'const':
                 pass

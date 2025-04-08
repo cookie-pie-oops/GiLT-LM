@@ -70,9 +70,10 @@ parser.add_argument('--beta', default=0.1, type=float)
 parser.add_argument('--rel_type', default="degree", type=str)
 parser.add_argument('--eval_type', default="normal", type=str)
 parser.add_argument('--sampling_num', default=0, type=int)
-parser.add_argument('--degree_len', default=400, type=int)
-parser.add_argument('--distance_len', default=400, type=int)
-parser.add_argument('--depth_len', default=224, type=int)
+parser.add_argument('--degree_len', default=344, type=int)
+parser.add_argument('--distance_len', default=344, type=int)
+parser.add_argument('--depth_len', default=168, type=int)
+parser.add_argument('--predepth_len', default=168, type=int)
 
 biaffine_hidden = 2048
 
@@ -565,7 +566,7 @@ def main(args):
         model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
                                    eos_id, left_arc, right_arc, pop_root, startofword_id, args.pre_lnorm,
-                                   args.rel_type, args.degree_len, args.distance_len, args.depth_len)
+                                   args.rel_type, args.degree_len, args.distance_len, args.depth_len, args.predepth_len)
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
         model.apply(weights_init)
         fan_in = nn.init._calculate_correct_fan(model.emb.weight, 'fan_in')

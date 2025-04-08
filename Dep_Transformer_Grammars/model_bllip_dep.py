@@ -11,6 +11,140 @@ from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
 
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+
+
+def apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+class FF_llama(nn.Module):
+    def __init__(self, d_model, d_inner):
+        super(FF_lamma, self).__init__()
+        d_inner = int(2 * d_inner / 3)
+
+        self.w1 = nn.Linear(d_model, d_inner)
+        self.w2 = nn.Linear(d_inner, d_model)
+        self.w3 = nn.Linear(d_model, d_inner)
+
+        self.layer_norm = RMSNorm(d_model)
+
+    def forward(self, inp):
+        x = self.layer_norm(inp)
+        return inp + self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+# class Attention_llama(nn.Module):
+#     def __init__(self, args):
+#         super().__init__()
+#         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+#         self.n_local_heads = args.n_heads // model_parallel_size
+#         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+#         self.n_rep = self.n_local_heads // self.n_local_kv_heads
+#         self.head_dim = args.dim // args.n_heads
+
+#         self.qkv_net = nn.Linear(d_model, 3 * n_head * d_head, bias=False)
+#         self.o_net = nn.Linear(n_head * d_head, d_model, bias=False)
+
+#         self.cache_k = torch.zeros(
+#             (
+#                 args.max_batch_size,
+#                 args.max_seq_len,
+#                 self.n_local_kv_heads,
+#                 self.head_dim,
+#             )
+#         ).cuda()
+#         self.cache_v = torch.zeros(
+#             (
+#                 args.max_batch_size,
+#                 args.max_seq_len,
+#                 self.n_local_kv_heads,
+#                 self.head_dim,
+#             )
+#         ).cuda()
+
+#     def forward(
+#         self,
+#         x: torch.Tensor,
+#         start_pos: int,
+#         freqs_cis: torch.Tensor,
+#         mask: Optional[torch.Tensor],
+#     ):
+#         bsz, seqlen, _ = x.shape
+
+#         xq, xk, xv = torch.chunk(self.qkv_net(x), 3, dim=-1)
+#         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+#         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+#         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+#         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+#         self.cache_k = self.cache_k.to(xq)
+#         self.cache_v = self.cache_v.to(xq)
+
+#         self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+#         self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+#         keys = self.cache_k[:bsz, : start_pos + seqlen]
+#         values = self.cache_v[:bsz, : start_pos + seqlen]
+
+#         # repeat k/v heads if n_kv_heads < n_heads
+#         keys = repeat_kv(
+#             keys, self.n_rep
+#         )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+#         values = repeat_kv(
+#             values, self.n_rep
+#         )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+
+#         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+#         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+#         values = values.transpose(
+#             1, 2
+#         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+#         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+#         if mask is not None:
+#             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+#         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+#         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+#         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+#         return self.wo(output)
+
 def dijkstra(adj_matrix, start):
     n = len(adj_matrix)
     distances = [float('inf')] * n
@@ -128,7 +262,7 @@ class MLPforBiaffine(nn.Module):
         super(MLPforBiaffine, self).__init__()
 
         self.proj = nn.Linear(concat_dim, input_dim, bias=False)
-        self.L_1 = nn.Linear(input_dim, inner_dim)
+        self.L_1 = nn.Linear(input_dim, inner_dim)  # concat
         self.L_2 = nn.Linear(inner_dim, output_dim)
         self.layer_norm_input = nn.LayerNorm(output_dim)
         # self.layer_norm_input = nn.LayerNorm(input_dim)
@@ -155,11 +289,16 @@ class MLPforBiaffine(nn.Module):
         # return x
 
 class BiaffineAttention(nn.Module):
-    def __init__(self, d_model, input_dim, type="default"):
+    def __init__(self, d_model, input_dim, embed_len, type="default"):
         super(BiaffineAttention, self).__init__()
         # d_model = 1024
         self.input_dim = input_dim
         self.proj_dim = 256
+        embed_len = [2 * i for i in embed_len]
+        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
+                torch.nn.Embedding(151, embed_len[1]),
+                torch.nn.Embedding(151, embed_len[2]),
+                torch.nn.Embedding(151, embed_len[3])])
 
         # self.W = nn.Linear(self.proj_dim, self.proj_dim, bias=False)
         # self.V = nn.Parameter(torch.Tensor(1, self.proj_dim))
@@ -192,7 +331,7 @@ class BiaffineAttention(nn.Module):
         # nn.init.xavier_normal_(self.proj.weight)
         # nn.init.zeros_(self.bias)
     
-    def forward(self, input1, input2): # 1*d, l*d
+    def forward(self, input1, input2, attn_relpos): # 1*d, l*d
         if self.type == "Multi":
             # B = input2.size(0)
             # root_tokens = self.root_representation.repeat(B, 1, 1)
@@ -203,8 +342,11 @@ class BiaffineAttention(nn.Module):
             repeat_shape[-2] = 1
             root_tokens = self.root_representation.repeat(*repeat_shape)
             input2 = torch.cat((root_tokens, input2), dim=input2.dim() - 2)
+        attn_relpos = torch.clip(attn_relpos, 0, 150).long()
+        embed_tuple = [self.depth_embed[i](attn_relpos[i]) for i in range(4)]
+        embed_biases = torch.cat(embed_tuple, dim = -1)
         input1 = self.f_1(input1)   #b*1*d
-        input2 = self.f_2(input2)   #b*l*d
+        input2 = self.f_2(input2 + embed_biases)   #b*l*d
         # input1 = self.proj1(input1) #ori
         # input2 = self.proj2(input2) #ori
         # score = torch.einsum('b i d, b j d -> b i j', input1, input2)
@@ -351,13 +493,19 @@ class RelMultiHeadAttn(nn.Module):
 
 class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
     def __init__(self, *args, **kwargs):
+        embed_len = kwargs.pop('embed_len', None)
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
-
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        # self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+        if embed_len[0] is not None:
+            self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
+                torch.nn.Embedding(151, embed_len[1]),
+                torch.nn.Embedding(151, embed_len[2]),
+                torch.nn.Embedding(151, embed_len[3])])
+        else:
+            self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
-        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
+        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)  # L, M-m, B
         # print(qlen, rlen)
         # r: M-m * None * d_model
@@ -378,22 +526,30 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 # print(w.shape)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
-            if depth_embed is not None:
+            if self.depth_embed is not None:
                 r2 = torch.arange(max_len - min_len, -1, -1.0, device=w.device).long()
-                W_k = self.qkv_net[0].weight[1024:2048, :]
+                W_k = self.qkv_net[0].weight[self.d_model:2 * self.d_model, :]
                 if attn_relpos.dim() == 4:
-                    degree_embed, distance_embed, depth_embed = depth_embed
+                    degree_embed, distance_embed, depth_embed, predepth_embed = self.depth_embed
+                    rel_len = [embed_layer.weight.shape[1] for embed_layer in self.depth_embed]
+                    # degree_embed, distance_embed, depth_embed = depth_embed
                     degree_biases = degree_embed(r2)
                     depth_biases = depth_embed(r2)
                     distance_biases = distance_embed(r2)
-                    degree_wk = degree_biases @ W_k[:, :400].T
-                    distance_wk = distance_biases @ W_k[:, 400:800].T
-                    depth_wk = depth_biases @ W_k[:, 800:1024].T
+                    predepth_biases = predepth_embed(r2)
+                    degree_wk = degree_biases @ W_k[:, :rel_len[0]].T
+                    distance_wk = distance_biases @ W_k[:, rel_len[0]:rel_len[0]+rel_len[1]].T
+                    depth_wk = depth_biases @ W_k[:, rel_len[0]+rel_len[1]:rel_len[0]+rel_len[1]+rel_len[2]].T
+                    predepth_wk = predepth_biases @ W_k[:, rel_len[0]+rel_len[1]+rel_len[2]:self.d_model].T
+                    # degree_wk = degree_biases @ W_k[:, :400].T
+                    # distance_wk = distance_biases @ W_k[:, 400:800].T
+                    # depth_wk = depth_biases @ W_k[:, 800:1024].T
                     degree_wk = degree_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
                     distance_wk = distance_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
                     depth_wk = depth_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
+                    predepth_wk = predepth_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
                 else:
-                    depth_biases = depth_embed(r2)
+                    depth_biases = self.depth_embed(r2)
                     # Moderate_rk = self.r_net(depth_biases)
                     Moderate_wk = depth_biases @ W_k.T
                     Moderate_wk = Moderate_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
@@ -459,13 +615,16 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
                 attn_relpos = attn_relpos.permute(0, 2, 3, 1)
                 attn_relpos = (max_len - attn_relpos).long()
-                degree_relpos, depth_relpos, distance_relpos = attn_relpos
+                degree_relpos, depth_relpos, distance_relpos, predepth_relpos = attn_relpos
+                # degree_relpos, depth_relpos, distance_relpos = attn_relpos
                 Moderate_AC_degree = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, degree_wk))
                 Moderate_AC_distance = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, distance_wk))
                 Moderate_AC_depth = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, depth_wk))
+                Moderate_AC_predepth = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, predepth_wk))
                 BD = self._rel_shift(BD) + (Moderate_AC_degree.gather(1, degree_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
                     + Moderate_AC_distance.gather(1, distance_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-                    + Moderate_AC_depth.gather(1, depth_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1])))
+                    + Moderate_AC_depth.gather(1, depth_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+                    + Moderate_AC_predepth.gather(1, predepth_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1])))
 
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
@@ -510,12 +669,11 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             return output
 
 class TransformerGrammarLayer(nn.Module):
-    def __init__(self, n_head, d_model, d_head, d_inner, dropoutf, dropouta,
+    def __init__(self, n_head, d_model, d_head, d_inner, dropoutf, dropouta, embed_len = (None),
                  **kwargs):
         super(TransformerGrammarLayer, self).__init__()
-
         self.dec_attn = RelPartialLearnableMultiHeadAttn(n_head, d_model,
-                            d_head, dropouta, **kwargs)
+                            d_head, dropouta, embed_len = embed_len, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None,
@@ -525,7 +683,7 @@ class TransformerGrammarLayer(nn.Module):
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
                                 min_len=min_len, max_len=max_len, mems=mems,
                                 terminal=terminal, past_keys=past_keys, past_values=past_values,
-                                cache=cache, depth_embed=depth_embed)
+                                cache=cache)
             output = self.pos_ff(output)
 
             return output, new_key, new_value
@@ -533,7 +691,7 @@ class TransformerGrammarLayer(nn.Module):
             output = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
                                 min_len=min_len, max_len=max_len, mems=mems, terminal=terminal,
-                                past_keys=past_keys, past_values=past_values, depth_embed=depth_embed)
+                                past_keys=past_keys, past_values=past_values)
             output = self.pos_ff(output)
             
             return output
@@ -557,9 +715,10 @@ class TransformerGrammar(nn.Module):
                  startofword_id = [],
                  pre_lnorm = False,
                  rel_type = None,
-                 degree_len = 400,
-                 distance_len = 400,
-                 depth_len = 224):
+                 degree_len = None,
+                 distance_len = None,
+                 depth_len = None,
+                 predepth_len = None):
         super(TransformerGrammar, self).__init__()
         self.vocab_size = vocab_size
         self.d_model = w_dim
@@ -584,17 +743,13 @@ class TransformerGrammar(nn.Module):
             self.degree_len = degree_len
             self.distance_len = distance_len
             self.depth_len = depth_len
-            self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, degree_len),
-                torch.nn.Embedding(151, distance_len),
-                torch.nn.Embedding(151, depth_len)])
-            assert self.n_head * self.d_head == degree_len + distance_len + depth_len
-        elif rel_type is not None:
-            self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+            self.predepth_len = predepth_len
+            assert self.n_head * self.d_head == degree_len + distance_len + depth_len + predepth_len
         for _ in range(num_layers):
             self.layers.append(TransformerGrammarLayer(n_head, w_dim, d_head, 
                                 d_inner, dropout, dropoutatt, tgt_len = None, 
                                 ext_len = None, mem_len = None,
-                                pre_lnorm = pre_lnorm))
+                                pre_lnorm = pre_lnorm, embed_len = (degree_len, distance_len, depth_len, predepth_len)))
         
         self.pos_emb = PositionalEmbedding(w_dim)
         self.r_w_bias = nn.Parameter(torch.Tensor(self.n_head, self.d_head))
@@ -661,6 +816,7 @@ class TransformerGrammar(nn.Module):
             left_sents_arrow, right_sents_arrow = sents_arrow
 
             attn_relpos = []
+            attn_relpos_for_pointer = []
             if rel_type == "degree" or rel_type == "mixing":
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
                     input_size = len(sent_index_to_id) - 1
@@ -674,7 +830,9 @@ class TransformerGrammar(nn.Module):
 
                     sent_attn_relpos = np.zeros((length_i, length_i))
                     sent_attn_relpos_step = np.zeros((length_i))
+                    sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
                     finished_word_idx = -1
+                    degree_for_pointer = np.zeros((max(sent_index_to_id) + 1))
                     for i in range(input_size):
                         if sent_index_to_id[i] == -1:
                             continue
@@ -687,17 +845,25 @@ class TransformerGrammar(nn.Module):
                                     if j != 0:
                                         sent_attn_relpos_step[id_to_index[j]] += 10 # 10
                                     sent_attn_relpos_step[id_to_index[add_arc_idx]] += 1
+                                    degree_for_pointer[j] += 10
+                                    degree_for_pointer[add_arc_idx] += 1
+
                             if right_sent_arrow[add_arc_idx - 1]: #i -> j
                                 for j in right_sent_arrow[add_arc_idx - 1]:
-                                    sent_attn_relpos_step[id_to_index[j]] += 1
+                                    if j != 0:
+                                        sent_attn_relpos_step[id_to_index[j]] += 1
                                     sent_attn_relpos_step[id_to_index[add_arc_idx]] += 10 # 10
+                                    degree_for_pointer[j] += 1
+                                    degree_for_pointer[add_arc_idx] += 10
                         sent_attn_relpos[i] = copy.deepcopy(sent_attn_relpos_step)
+                        sent_attn_relpos_for_pointer[add_arc_idx] = copy.deepcopy(degree_for_pointer)
                         # Wk R
                         # rel_pos_1 = rel_pos_1[(i+1):] + rel_pos_1[:(i+1)]
                         # rel_pos_2 = rel_pos_2[(i+1):] + rel_pos_2[:(i+1)]
                     # for j in range(length_i - len(sent_attn_relpos)):
                     #     sent_attn_relpos.append([0]*(length_i))
                     attn_relpos.append(sent_attn_relpos)
+                    attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
                     # attn_relpos.append(10 * np.array(Degree_out[:-1]) + 1 * np.array(Degree_in[:-1]))
             if rel_type == "depth" or rel_type == "rel_depth" or rel_type == "mixing":
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
@@ -713,6 +879,8 @@ class TransformerGrammar(nn.Module):
                     graph_len = len(left_sent_arrow) + 1
                     graph = np.zeros((graph_len, graph_len))
                     sent_attn_relpos = np.zeros((length_i, length_i))
+                    sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
+                    sent_attn_relpos_for_pointer[0, 0] = 1  # root
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
@@ -732,8 +900,11 @@ class TransformerGrammar(nn.Module):
                             depth = [item - depth[finished_word_idx] for item in depth]
                         for id, depth_value in enumerate(depth[1:]):
                             sent_attn_relpos[i, id_to_index[id + 1]] = depth_value
+                        for id, depth_value in enumerate(depth):
+                            sent_attn_relpos_for_pointer[finished_word_idx, id] = depth_value
                     # for j in range(length_i - len(sent_attn_relpos)):
                     #     sent_attn_relpos.append([0]*(length_i))
+                    attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
                     attn_relpos.append(sent_attn_relpos)
             if rel_type == "distance" or rel_type == "mixing":
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
@@ -749,6 +920,7 @@ class TransformerGrammar(nn.Module):
                     graph_len = len(left_sent_arrow) + 1
                     graph = np.zeros((graph_len, graph_len))
                     sent_attn_relpos = np.zeros((length_i, length_i))
+                    sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
@@ -766,16 +938,56 @@ class TransformerGrammar(nn.Module):
                         distance = dijkstra(graph[:finished_word_idx + 1, :finished_word_idx + 1], finished_word_idx)
                         for id, distance_value in enumerate(distance[1:]):
                             sent_attn_relpos[i, id_to_index[id + 1]] = distance_value
-
+                        for id, distance_value in enumerate(distance):
+                            sent_attn_relpos_for_pointer[finished_word_idx, id] = distance_value
                     # for j in range(length_i - len(sent_attn_relpos)):
                         # sent_attn_relpos.append([0]*(length_i))
+                    attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
                     attn_relpos.append(sent_attn_relpos)
-                
+            if rel_type == "predicate_depth" or rel_type == "mixing":
+                for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
+                    input_size = len(sent_index_to_id) - 1
+                    id_to_index = {}
+                    for i in range(len(sent_index_to_id)):
+                        if sent_index_to_id[i] != -1:
+                            if sent_index_to_id[i] not in id_to_index:
+                                id_to_index[sent_index_to_id[i]] = [i]
+                            else:
+                                id_to_index[sent_index_to_id[i]].append(i)
+                    
+                    sent_attn_relpos = np.zeros((length_i, length_i))
+                    sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
+                    father_tag = np.zeros(len(left_sent_arrow))
+                    finished_word_idx = -1
+                    for i in range(input_size):
+                        if sent_index_to_id[i] == -1:
+                            continue
+                        tmp_finished_word_idx = finished_word_idx
+                        finished_word_idx = sent_index_to_id[i] # first token i - 1
+                        if finished_word_idx != tmp_finished_word_idx:
+                            if right_sent_arrow[finished_word_idx - 1]:  #i <- j
+                                father_tag[[idx - 1 for idx in right_sent_arrow[finished_word_idx - 1] if idx != 0]] = 1
+                            if left_sent_arrow[finished_word_idx - 1]: #i -> j
+                                father_tag[finished_word_idx - 1] = 1
+                        depth = 0
+                        for idx in range(finished_word_idx, 0, -1):
+                            if not father_tag[idx - 1]:
+                                depth += 1
+                                sent_attn_relpos[i, id_to_index[idx]] = depth
+                                sent_attn_relpos_for_pointer[finished_word_idx, idx] = depth
+                            else:
+                                sent_attn_relpos[i, id_to_index[idx]] = 0
+                                sent_attn_relpos_for_pointer[finished_word_idx, idx] = 0
+                    attn_relpos.append(sent_attn_relpos) 
+                    attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
+            
             attn_relpos = torch.LongTensor(np.array(attn_relpos))
             if rel_type == "mixing":
-                attn_relpos = attn_relpos.reshape(3, batch, length_i, length_i)
+                attn_relpos = attn_relpos.reshape(4, batch, length_i, length_i)
+                attn_relpos_for_pointer = [torch.LongTensor(np.array([attn_relpos_for_pointer[i + j * batch] for j in range(4)])) for i in range(batch)]
             if torch.cuda.is_available():
                 attn_relpos = attn_relpos.cuda()
+                attn_relpos_for_pointer = [attn_relpos_for_pointer[i].cuda() for i in range(batch)]
 
         elif use_mask == 'sdp_arc':
             assert sents_index_to_id is not None and sents_arrow is not None
@@ -1005,7 +1217,7 @@ class TransformerGrammar(nn.Module):
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
             core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
-                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length, depth_embed = self.depth_embed)
+                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)
@@ -1049,11 +1261,64 @@ class TransformerGrammar(nn.Module):
 
         if return_h:
             if use_mask == "graphlayer":
-                return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb
+                return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer
                 # return loss, hiddens[9] + hiddens[15]
             return loss, core_out
         else:
             return loss
+
+    
+    def GraphlayerLM_inference(self, x, past_keys, past_values, attn_relpos = None):
+        with torch.no_grad():
+            inp = x.permute(1, 0).contiguous()  # 1 * batch new token
+            word_emb = self.emb(inp)
+            seq_len = attn_relpos.shape[3]
+            pos_emb = self.pos_emb(torch.arange(seq_len - 1, -1, -1.0, device = word_emb.device))
+            batch = x.shape[0]
+            new_keys = torch.full((self.num_layers, 1, batch, self.w_dim), 0.0, device=word_emb.device)
+            new_values = torch.full((self.num_layers, 1, batch, self.w_dim), 0.0, device=word_emb.device)
+            
+            past_keys_p = None
+            past_values_p = None
+            if past_keys is not None:
+                past_keys_p = past_keys.reshape(past_keys.size(0), past_keys.size(1), self.num_layers, self.w_dim)
+                past_values_p = past_values.reshape(past_values.size(0), past_values.size(1), self.num_layers, self.w_dim)
+                past_keys_p = past_keys_p.permute(2, 1, 0, 3).contiguous() # layer * L-1 * batch * w_dim
+                past_values_p = past_values_p.permute(2, 1, 0, 3).contiguous() 
+
+            hiddens = []
+            core_out = word_emb
+            hiddens.append(core_out)
+            for i, layer in enumerate(self.layers):
+                if past_values_p is not None:
+                    core_out, new_key, new_value = \
+                                    layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
+                                    attn_mask=None, attn_relpos=attn_relpos, 
+                                    min_len=0, max_len=150,
+                                    past_keys=past_keys_p[i], past_values=past_values_p[i], cache=True)
+                else:
+                    core_out, new_key, new_value = \
+                                    layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
+                                    attn_mask=None, attn_relpos=attn_relpos, 
+                                    min_len=0, max_len=150, 
+                                    past_keys=None, past_values=None, cache=True)
+                hiddens.append(core_out)
+                new_keys[i] = new_key
+                new_values[i] = new_value
+            
+            logits = self.projection(core_out) 
+            prob = logits.view(1, batch, -1)
+            prob = prob.log_softmax(-1)
+            new_keys = new_keys.permute(2, 1, 0, 3).contiguous()
+            new_values = new_values.permute(2, 1, 0, 3).contiguous()
+            new_keys = new_keys.reshape(new_keys.size(0), new_keys.size(1), -1)
+            new_values = new_values.reshape(new_values.size(0), new_values.size(1), -1)
+
+            return prob, new_keys, new_values, torch.cat([hiddens[9], hiddens[15]], dim = -1)
+    
+
+    def get_emb(self, input_id):
+        return self.emb(input_id)
 
 
     def constrained_forward_gen(self, 
