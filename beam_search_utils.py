@@ -6,6 +6,7 @@ from heapq import heapify, heappush, heappop, heappushpop
 from typing import List, Tuple
 import torch
 from copy import deepcopy
+from model_bllip_con import PushdownTransformerConstituency
 
 class BeamObj:
     def __init__(self, score, score_seq, attachment_decisions, step):
@@ -31,7 +32,7 @@ class BeamSearchDepthBased:
         
     def update_beam(self,
                     ids,
-                    model,
+                    model: PushdownTransformerConstituency,
                     beam_curr: List[BeamObj],
                     list_reduced,
                     stack_tape
