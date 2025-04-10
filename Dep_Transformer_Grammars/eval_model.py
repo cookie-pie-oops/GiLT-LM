@@ -316,7 +316,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             # sents[0][-30:]=[0]*30
             # sents[0][-30]=2
             # The Blair & Co. is close to an agreement to sell its TV station advertising representation operation and program production unit to an investor group led by James H. Rosenfield , a former CBS Inc. executive , industry sources said .
-            ret, hidden, word_emb = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
+            ret, hidden, word_emb, attn_relpos_for_pointer = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, 
                         sents_arrow=[sents_left_arrow, sents_right_arrow], iseval=True, rel_type=args.rel_type)
 
@@ -333,9 +333,10 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             batch_left_labels = []
             batch_right_labels = []
             batch_mask = []
+            batch_attn = []
             if [left_arrow, right_arrow]:
-                for i, (sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label) in enumerate(zip(
-                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow)):
+                for i, (sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label, sent_attn_relpos) in enumerate(zip(
+                    sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer)):
                     sent_biaffine_loss = 0
                     input1 = []
                     max_word_length = max(sent_index_to_id)
@@ -394,8 +395,8 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                         if args.eval_type != "estimate":
                             inv_left_labels = mask - left_labels
                             inv_right_labels = mask - right_labels
-                            left_logits = left_biaffine_model(input1, input2).squeeze()
-                            right_logits = right_biaffine_model(input1, input2).squeeze()
+                            left_logits = left_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
+                            right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
                             sent_biaffine_loss += - torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels)) - torch.sum(torch.log(left_logits.mul(left_labels) + epsilon).mul(left_labels))
                             sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
                             
@@ -437,6 +438,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             batch_left_labels.append(left_labels)
                             batch_right_labels.append(right_labels)
                             batch_mask.append(mask)
+                            batch_attn.append(sent_attn_relpos)
                     if args.eval_type != "estimate":
                         ret[i] += sent_biaffine_loss
             num_sents += batch_size
@@ -447,8 +449,10 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                 batch_left_labels = torch.stack(batch_left_labels)
                 batch_right_labels = torch.stack(batch_right_labels)
                 batch_mask = torch.stack(batch_mask)
-                left_logits = left_biaffine_model(batch_input1, batch_input2).squeeze()
-                right_logits = right_biaffine_model(batch_input1, batch_input2).squeeze()
+                batch_attn = torch.stack(batch_attn)
+                batch_attn = batch_attn.permute(1, 0, 2, 3)
+                left_logits = left_biaffine_model(batch_input1, batch_input2, batch_attn).squeeze()
+                right_logits = right_biaffine_model(batch_input1, batch_input2, batch_attn).squeeze()
                 if left_logits.dim() == 2:
                     left_logits = left_logits.unsqueeze(1)
                     right_logits = right_logits.unsqueeze(1)

@@ -664,7 +664,7 @@ def main(args):
     if args.stage_two:
         checkpoint_step = (args.num_epochs - 1) * len(train_data)
     else:
-        checkpoint_step = 0
+        checkpoint_step = 33000
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0
@@ -673,8 +673,8 @@ def main(args):
         train_biaffine_loss = 0.0
         for i in range(len(train_data)):
             if train_step < checkpoint_step:
-                checkpoint_step -= 1
-                # train_step += 1
+                # checkpoint_step -= 1
+                train_step += 1
 
                 # optimizer.zero_grad()
                 # left_biaffine_optimizer.zero_grad()
@@ -734,13 +734,13 @@ def main(args):
 
                 biaffine_loss = []
                 # max_length = max([len(sent) for sent in sents])
-                padding_size = max(max(item) for item in sents_index_to_id)
-                total_input1 = []
-                total_input2 = []
-                total_left_labels = []
-                total_right_labels = []
-                total_mask = []
-                total_attn_rel = []
+                # padding_size = max(max(item) for item in sents_index_to_id)
+                # total_input1 = []
+                # total_input2 = []
+                # total_left_labels = []
+                # total_right_labels = []
+                # total_mask = []
+                # total_attn_rel = []
                 if [sents_left_arrow, sents_right_arrow]:
                     for sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label, attn_rel in zip(
                         sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
@@ -748,8 +748,8 @@ def main(args):
                         max_word_length = max(sent_index_to_id)
                         words_piece_input = torch.stack(arguments_input)
                         input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
-                        left_labels = torch.zeros(padding_size, padding_size + 1).to(device)
-                        right_labels = torch.zeros(padding_size, padding_size + 1).to(device)
+                        left_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
+                        right_labels = torch.zeros(max_word_length, max_word_length + 1).to(device)
                         for j in range(len(sent_ids)):
                             if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
                                 words_index = sent_index_to_id[j]
@@ -765,29 +765,52 @@ def main(args):
                         if input1:
                             input1 = torch.stack(input1)
                             mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:]
-                            input1 = torch.nn.functional.pad(input1, pad=(0, 0, 0, 0, 0, padding_size - input1.shape[-3]))
-                            input2 = torch.nn.functional.pad(input2, pad=(0, 0, 0, padding_size - input2.shape[-2], 0, padding_size - input2.shape[-3]))
-                            mask = torch.nn.functional.pad(mask, pad=(0, padding_size - mask.shape[-1] + 1, 0, padding_size - mask.shape[-2]))
-                            attn_rel = torch.nn.functional.pad(attn_rel, pad=(0, padding_size - attn_rel.shape[-1] + 1, 0, padding_size - attn_rel.shape[-2]))
+                            # input1 = torch.nn.functional.pad(input1, pad=(0, 0, 0, 0, 0, padding_size - input1.shape[-3]))
+                            # input2 = torch.nn.functional.pad(input2, pad=(0, 0, 0, padding_size - input2.shape[-2], 0, padding_size - input2.shape[-3]))
+                            # mask = torch.nn.functional.pad(mask, pad=(0, padding_size - mask.shape[-1] + 1, 0, padding_size - mask.shape[-2]))
+                            # attn_rel = torch.nn.functional.pad(attn_rel, pad=(0, padding_size - attn_rel.shape[-1] + 1, 0, padding_size - attn_rel.shape[-2]))
                             mask = mask.to(device)
-                            total_input1.append(input1)
-                            total_input2.append(input2)
-                            total_left_labels.append(left_labels)
-                            total_right_labels.append(right_labels)
-                            total_mask.append(mask)
-                            total_attn_rel.append(attn_rel)
-                    
-                    total_input1 = torch.stack(total_input1)
-                    total_input2 = torch.stack(total_input2)
-                    total_left_labels = torch.stack(total_left_labels)
-                    total_right_labels = torch.stack(total_right_labels)
-                    total_mask = torch.stack(total_mask)
-                    total_attn_rel = torch.stack(total_attn_rel)
-                    total_attn_rel = total_attn_rel.permute(1, 0, 2, 3)
-                    left_logits = left_biaffine_model(total_input1, total_input2, total_attn_rel)
-                    right_logits = right_biaffine_model(total_input1, total_input2, total_attn_rel)
-                    loss = (crit(left_logits.squeeze(),total_left_labels.squeeze().double()) * total_mask).sum() + (crit(right_logits.squeeze(),total_right_labels.squeeze().double()) * total_mask).sum()
-                    biaffine_loss.append(loss / 2) 
+                            left_logits = left_biaffine_model(input1, input2, attn_rel)
+                            right_logits = right_biaffine_model(input1, input2, attn_rel)
+                            loss = (crit(left_logits.squeeze(),left_labels.squeeze().double()) * mask).sum() + (crit(right_logits.squeeze(),right_labels.squeeze().double()) * mask).sum()
+                            biaffine_loss.append(loss / 2)
+                            # total_input1.append(input1)
+                            # total_input2.append(input2)
+                            # total_left_labels.append(left_labels)
+                            # total_right_labels.append(right_labels)
+                            # total_mask.append(mask)
+                            # total_attn_rel.append(attn_rel)
+
+                    #         if len(total_input1) == batch_size//2:
+                    #             total_input1 = torch.stack(total_input1)
+                    #             total_input2 = torch.stack(total_input2)
+                    #             total_left_labels = torch.stack(total_left_labels)
+                    #             total_right_labels = torch.stack(total_right_labels)
+                    #             total_mask = torch.stack(total_mask)
+                    #             total_attn_rel = torch.stack(total_attn_rel)
+                    #             total_attn_rel = total_attn_rel.permute(1, 0, 2, 3)
+                    #             left_logits = left_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    #             right_logits = right_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    #             loss = (crit(left_logits.squeeze(),total_left_labels.squeeze().double()) * total_mask).sum(dim=(1,2)) + (crit(right_logits.squeeze(),total_right_labels.squeeze().double()) * total_mask).sum(dim=(1,2))
+                    #             biaffine_loss.extend(loss / 2)
+                    #             total_input1 = []
+                    #             total_input2 = []
+                    #             total_left_labels = []
+                    #             total_right_labels = []
+                    #             total_mask = []
+                    #             total_attn_rel = []
+                    # if total_input1:
+                    #     total_input1 = torch.stack(total_input1)
+                    #     total_input2 = torch.stack(total_input2)
+                    #     total_left_labels = torch.stack(total_left_labels)
+                    #     total_right_labels = torch.stack(total_right_labels)
+                    #     total_mask = torch.stack(total_mask)
+                    #     total_attn_rel = torch.stack(total_attn_rel)
+                    #     total_attn_rel = total_attn_rel.permute(1, 0, 2, 3)
+                    #     left_logits = left_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    #     right_logits = right_biaffine_model(total_input1, total_input2, total_attn_rel)
+                    #     loss = (crit(left_logits.squeeze(),total_left_labels.squeeze().double()) * total_mask).sum(dim=(1,2)) + (crit(right_logits.squeeze(),total_right_labels.squeeze().double()) * total_mask).sum(dim=(1,2))
+                    #     biaffine_loss.extend(loss / 2)
 
             # if args.return_h:
             #     raw_loss, hidden = ret

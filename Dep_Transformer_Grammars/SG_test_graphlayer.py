@@ -211,14 +211,14 @@ if __name__ == "__main__":
     original_length = []
     original_seq_length = []
 
-    model_path = "models/graphlayer_large_psd_4_1:-1_mixing_ACE_predict_ahead_4mix.pt"
+    model_path = "models/graphlayer_large_psd_4_1:-1_mixing_ACE_predict_ahead_4newmix_dyn_embed_relonpointer.pt"
     # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead_4mix.pt"
-    # model_path = "models/graphlayer_small_psd_4_1:0.8_mixing_DTG_mlpdot_firsttoken_correctrel_decaytemp2_arugments_pushdown.pt"
     # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead.pt"
-    beamsize = 50
-    scorebeamsize = 10
+    beamsize = 30   # 50
+    scorebeamsize = 10  # 10
     logger.info("Model path: {}".format(model_path))
     logger.info("Beam size: {}".format(beamsize))
+    logger.info("Score beam size: {}".format(scorebeamsize))
     checkpoint = torch.load(model_path, map_location=torch.device(device))
     model = checkpoint['model']
     left_biaffine_model = checkpoint['left_biaffine_model']
@@ -242,7 +242,6 @@ if __name__ == "__main__":
         for idx in tqdm(range(len(test_suite_parser.meta_data["data"]))):
             examples = test_suite_parser.get_example(idx)
             phen2surprisals = {}
-            phen2surprisals_greedy = {}
             for phen in examples:
                 encoded = sp.Encode(examples[phen] + ["."], out_type=int)
                 tgt_idx = []
@@ -283,7 +282,6 @@ if __name__ == "__main__":
                 father_tag = np.zeros(graph_len - 1)
                 arcbeam = BEAM(beamsize)
                 scores = [0.0]
-                greedy_scores = [0.0]
                 step_score = 0.0
                 init_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
                 arcbeam.update(0.0, next(counter), init_graphinfo, None, None, None)
@@ -296,11 +294,20 @@ if __name__ == "__main__":
                     batch = arcbeam.get_batchsize()
                     mask_size = i + 1
                     attn_relpos = torch.zeros(4, batch, 1, mask_size).long().to(device)
+                    attn_relpos_for_pointer = torch.zeros(4, batch, max(sent_index_to_id[i], 0) + 1).long().to(device)
+                    attn_relpos_for_pointer[1, :, 0] = 1 # root always depth 1
                     for step, (step_score, step_graphinfo, pre_k, pre_v, pre_hiddens) in enumerate(temp_beam):
                         degree_list, graph_distance, graph, father_tag = step_graphinfo.get_info()
                         if sent_index_to_id[i] != -1:
                             depth_list = calculate_depth(graph[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1])
                             distance_list = dijkstra(graph_distance[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1], sent_index_to_id[i])
+                            for id in range(len(attn_relpos_for_pointer[0, step])):
+                                attn_relpos_for_pointer[0, step, id] = degree_list[id]  # previous step graph
+                            for id in range(len(attn_relpos_for_pointer[1, step])):
+                                attn_relpos_for_pointer[1, step, id] = depth_list[id]
+                            for id in range(len(attn_relpos_for_pointer[2, step])):
+                                attn_relpos_for_pointer[2, step, id] = distance_list[id]
+                            
                             for id, degree_value in enumerate(degree_list[1:]):
                                 attn_relpos[0, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = degree_value
                             for id, depth_value in enumerate(depth_list[1:]):
@@ -310,9 +317,9 @@ if __name__ == "__main__":
                             pred_depth = np.sum(father_tag[:sent_index_to_id[i]] == 0)
                             for id, father_value in enumerate(father_tag[:sent_index_to_id[i]]):
                                 if father_value != 1:
-                                    attn_relpos[3, 0, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = pred_depth
+                                    attn_relpos_for_pointer[3, step, id + 1] = pred_depth
+                                    attn_relpos[3, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = pred_depth
                                     pred_depth -= 1
-                    
                     if i == 0:
                         cache_k = None
                         cache_v = None
@@ -340,14 +347,14 @@ if __name__ == "__main__":
                         predicates = torch.stack(predicate_list).view(batch, 1, -1)
                         with torch.no_grad():
                             if arguments_list == [[]]:
-                                arguments = torch.zeros(1,1,2048).to(device)
-                                left_logits = left_biaffine_model(predicate, arguments)[:, :-1]
-                                right_logits = right_biaffine_model(predicate, arguments)[:, :-1]
+                                arguments = torch.empty(1, 0, 2048).to(device)
+                                left_logits = left_biaffine_model(predicate, arguments, attn_relpos_for_pointer)
+                                right_logits = right_biaffine_model(predicate, arguments, attn_relpos_for_pointer)
                             else:
                                 arguments = torch.stack([torch.stack(sublist) for sublist in arguments_list]).view(batch, -1, 2048).to(device)
                                 # arguments = torch.stack(arguments[0]).view(1, -1, 2048).to(device)
-                                left_logits = left_biaffine_model(predicate, arguments).squeeze(-1)
-                                right_logits = right_biaffine_model(predicate, arguments).squeeze(-1) # B* L*1 logits
+                                left_logits = left_biaffine_model(predicate, arguments, attn_relpos_for_pointer).squeeze(-1)
+                                right_logits = right_biaffine_model(predicate, arguments, attn_relpos_for_pointer).squeeze(-1) # B* L*1 logits
                     pointertime = time.time()
                     # logger.info("Pointer time: {}".format(pointertime - transformerforward))
                     
@@ -426,24 +433,19 @@ if __name__ == "__main__":
                         one_beam_end = time.time()
                         # logger.info("One Beam Time: {}".format(one_beam_end - one_beam_start))
                     # sum_step_scores = [scores for (scores, graphinfos) in stepbeam.get_graphinfo()]
-                    greedy_score = -np.max(temp_score)  # not greedy actually
                     step_score = -np.log(np.exp(temp_score).sum())
                     scores.append(step_score)
-                    greedy_scores.append(greedy_score)
                     arcbeam = next_arcbeam
                     end_time = time.time()
                     # logger.info("One token Time: {}".format(end_time - start_time))
                 # scores = -beam_sum_scores.cpu().numpy() # - means surprisals
                 # import pdb;pdb.set_trace()
                 target_surprisals = [scores[tgt_idx[i][1]] - scores[tgt_idx[i][0]] for i in range(len(tgt_idx))]
-                target_surprisals_greedy = [greedy_scores[tgt_idx[i][1]] - greedy_scores[tgt_idx[i][0]] for i in range(len(tgt_idx))]
                 # print(target_surprisals)
                 # logger.info(target_surprisals)
                 phen2surprisals[phen] = [0] + target_surprisals
-                phen2surprisals_greedy[phen] = [0] + target_surprisals_greedy
             
             extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
-            extracted_formula_greedy = test_suite_parser.extract_formulas(phen2surprisals_greedy)
             test_suite_parser.answers[idx] = extracted_formula
         acc = 0.0
         for formula in test_suite_parser.answers:
