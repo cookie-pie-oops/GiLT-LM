@@ -2,8 +2,8 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_large_psd_4_mixing_ACE_predict_ahead_4newmix_dyn_embed_relonpointer_sampling.out
-export DATASET=psd
+#SBATCH --output=graphlayer_large_pas_4_mixing_ACE_predict_ahead_4newmix_dyn_embed_relonpointer_sampling.out
+export DATASET=pas
 export RELTYPE=mixing
 export EVALTYPE=estimate    #estimate
 

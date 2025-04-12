@@ -211,11 +211,11 @@ if __name__ == "__main__":
     original_length = []
     original_seq_length = []
 
-    model_path = "models/graphlayer_large_psd_4_1:-1_mixing_ACE_predict_ahead_4newmix_dyn_embed_relonpointer.pt"
+    model_path = "models/graphlayer_large_psd_4_1:1_mixing_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.pt"
     # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead_4mix.pt"
     # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead.pt"
-    beamsize = 30   # 50
-    scorebeamsize = 10  # 10
+    beamsize = 5   # 50
+    scorebeamsize = 5  # 10
     logger.info("Model path: {}".format(model_path))
     logger.info("Beam size: {}".format(beamsize))
     logger.info("Score beam size: {}".format(scorebeamsize))
@@ -326,7 +326,9 @@ if __name__ == "__main__":
                     else:
                         cache_k = torch.stack([item[2] for item in temp_beam]).view(batch, i, -1)
                         cache_v = torch.stack([item[3] for item in temp_beam]).view(batch, i, -1)
-                    
+                    # rowattn_relpos =  torch.zeros(4, 1, i+1, i+1).long().to(device)
+                    # batchprob = model.GraphlayerLM_inference(tokens, None, None, rowattn_relpos)
+                    # [batchprob[0].view(len(encoded[1:]),-1)[idx, encoded[idx + 1]].item() for idx in range(12)]
                     prob, new_k, new_v, new_hiddens = model.GraphlayerLM_inference(tokens[:, i].repeat(batch, 1), cache_k, cache_v, attn_relpos)
                     new_hiddens = new_hiddens.transpose(0, 1)
                     transformerforward = time.time()
@@ -455,5 +457,6 @@ if __name__ == "__main__":
         
         logger.info(f"correct rate: {acc / len(test_suite_parser.answers)}")
         final_acc.append(acc / len(test_suite_parser.answers))
+        logger.info(f"mean correct rate up to now: {np.mean(final_acc)}")
     
     logger.info(f"final correct rate: {np.mean(final_acc)}")

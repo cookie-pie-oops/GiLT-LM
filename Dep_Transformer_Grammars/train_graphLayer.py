@@ -521,10 +521,10 @@ def main(args):
                                    eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
                                    args.pre_lnorm, args.rel_type, args.degree_len, args.distance_len,
                                    args.depth_len, args.predepth_len)
-        left_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.distance_len,
-                                   args.depth_len, args.predepth_len), type="Multi")
-        right_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.distance_len,
-                                   args.depth_len, args.predepth_len), type="Multi")
+        left_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.depth_len,
+                                   args.distance_len, args.predepth_len), type="Multi")
+        right_biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.depth_len,
+                                   args.distance_len, args.predepth_len), type="Multi")
         logger.info(f"Transformer parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in left_biaffine_model.parameters()) * 2}")
         model.apply(weights_init)
@@ -664,7 +664,7 @@ def main(args):
     if args.stage_two:
         checkpoint_step = (args.num_epochs - 1) * len(train_data)
     else:
-        checkpoint_step = 33000
+        checkpoint_step = 0
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0

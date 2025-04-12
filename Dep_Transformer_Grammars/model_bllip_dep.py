@@ -295,7 +295,7 @@ class BiaffineAttention(nn.Module):
         self.input_dim = input_dim
         self.proj_dim = 256
         embed_len = [2 * i for i in embed_len]
-        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
+        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),    # degree, depth, distance, pred_depth (Not the same as the Transformer)
                 torch.nn.Embedding(151, embed_len[1]),
                 torch.nn.Embedding(151, embed_len[2]),
                 torch.nn.Embedding(151, embed_len[3])])
@@ -493,19 +493,19 @@ class RelMultiHeadAttn(nn.Module):
 
 class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
     def __init__(self, *args, **kwargs):
-        embed_len = kwargs.pop('embed_len', None)
+        # embed_len = kwargs.pop('embed_len', None)
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        if embed_len[0] is not None:
-            self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
-                torch.nn.Embedding(151, embed_len[1]),
-                torch.nn.Embedding(151, embed_len[2]),
-                torch.nn.Embedding(151, embed_len[3])])
-        else:
-            self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
+        # if embed_len[0] is not None:
+        #     self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
+        #         torch.nn.Embedding(151, embed_len[1]),
+        #         torch.nn.Embedding(151, embed_len[2]),
+        #         torch.nn.Embedding(151, embed_len[3])])
+        # else:
+        #     self.depth_embed = torch.nn.Embedding(151, self.n_head * self.d_head)
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
-        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False):
+        , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, rel_embed = None):
         qlen, rlen, bsz = w.size(0), r.size(0), w.size(1)  # L, M-m, B
         # print(qlen, rlen)
         # r: M-m * None * d_model
@@ -526,12 +526,12 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 # print(w.shape)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
-            if self.depth_embed is not None:
+            if rel_embed is not None:
                 r2 = torch.arange(max_len - min_len, -1, -1.0, device=w.device).long()
                 W_k = self.qkv_net[0].weight[self.d_model:2 * self.d_model, :]
                 if attn_relpos.dim() == 4:
-                    degree_embed, distance_embed, depth_embed, predepth_embed = self.depth_embed
-                    rel_len = [embed_layer.weight.shape[1] for embed_layer in self.depth_embed]
+                    degree_embed, distance_embed, depth_embed, predepth_embed = rel_embed
+                    rel_len = [embed_layer.weight.shape[1] for embed_layer in rel_embed]
                     # degree_embed, distance_embed, depth_embed = depth_embed
                     degree_biases = degree_embed(r2)
                     depth_biases = depth_embed(r2)
@@ -549,7 +549,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                     depth_wk = depth_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
                     predepth_wk = predepth_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
                 else:
-                    depth_biases = self.depth_embed(r2)
+                    depth_biases = rel_embed(r2)
                     # Moderate_rk = self.r_net(depth_biases)
                     Moderate_wk = depth_biases @ W_k.T
                     Moderate_wk = Moderate_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
@@ -669,21 +669,21 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
             return output
 
 class TransformerGrammarLayer(nn.Module):
-    def __init__(self, n_head, d_model, d_head, d_inner, dropoutf, dropouta, embed_len = (None),
+    def __init__(self, n_head, d_model, d_head, d_inner, dropoutf, dropouta,
                  **kwargs):
         super(TransformerGrammarLayer, self).__init__()
         self.dec_attn = RelPartialLearnableMultiHeadAttn(n_head, d_model,
-                            d_head, dropouta, embed_len = embed_len, **kwargs)
+                            d_head, dropouta, **kwargs)
         self.pos_ff = PositionwiseFF(d_model, d_inner, dropoutf, 
                                      pre_lnorm=kwargs.get('pre_lnorm'))
     def forward(self, dec_inp, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None,
-        mems=None, terminal=False, past_keys=None, past_values=None, cache=False, depth_embed=None):
+        mems=None, terminal=False, past_keys=None, past_values=None, cache=False, rel_embed=None):
         if cache:
             output, new_key, new_value = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
                                 min_len=min_len, max_len=max_len, mems=mems,
                                 terminal=terminal, past_keys=past_keys, past_values=past_values,
-                                cache=cache)
+                                cache=cache, rel_embed=rel_embed)
             output = self.pos_ff(output)
 
             return output, new_key, new_value
@@ -691,7 +691,7 @@ class TransformerGrammarLayer(nn.Module):
             output = self.dec_attn(dec_inp, r, r_w_bias, r_r_bias,
                                 attn_mask=attn_mask, attn_relpos=attn_relpos,
                                 min_len=min_len, max_len=max_len, mems=mems, terminal=terminal,
-                                past_keys=past_keys, past_values=past_values)
+                                past_keys=past_keys, past_values=past_values, rel_embed=rel_embed)
             output = self.pos_ff(output)
             
             return output
@@ -744,12 +744,16 @@ class TransformerGrammar(nn.Module):
             self.distance_len = distance_len
             self.depth_len = depth_len
             self.predepth_len = predepth_len
+            self.rel_embed = nn.ModuleList([torch.nn.Embedding(151, degree_len),  # degree, distance, depth, pred_depth
+                torch.nn.Embedding(151, distance_len),
+                torch.nn.Embedding(151, depth_len),
+                torch.nn.Embedding(151, predepth_len)])
             assert self.n_head * self.d_head == degree_len + distance_len + depth_len + predepth_len
         for _ in range(num_layers):
             self.layers.append(TransformerGrammarLayer(n_head, w_dim, d_head, 
                                 d_inner, dropout, dropoutatt, tgt_len = None, 
                                 ext_len = None, mem_len = None,
-                                pre_lnorm = pre_lnorm, embed_len = (degree_len, distance_len, depth_len, predepth_len)))
+                                pre_lnorm = pre_lnorm))
         
         self.pos_emb = PositionalEmbedding(w_dim)
         self.r_w_bias = nn.Parameter(torch.Tensor(self.n_head, self.d_head))
@@ -1217,7 +1221,7 @@ class TransformerGrammar(nn.Module):
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
             core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
-                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length)
+                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length, rel_embed = self.rel_embed)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)
@@ -1294,13 +1298,13 @@ class TransformerGrammar(nn.Module):
                     core_out, new_key, new_value = \
                                     layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
                                     attn_mask=None, attn_relpos=attn_relpos, 
-                                    min_len=0, max_len=150,
+                                    min_len=0, max_len=150, rel_embed = self.rel_embed,
                                     past_keys=past_keys_p[i], past_values=past_values_p[i], cache=True)
                 else:
                     core_out, new_key, new_value = \
                                     layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
                                     attn_mask=None, attn_relpos=attn_relpos, 
-                                    min_len=0, max_len=150, 
+                                    min_len=0, max_len=150, rel_embed = self.rel_embed,
                                     past_keys=None, past_values=None, cache=True)
                 hiddens.append(core_out)
                 new_keys[i] = new_key

@@ -10,7 +10,7 @@
 # To do list: test fix ratio
 
 export DATASET=psd
-export DATASIZE=large
+export DATASIZE=demo
 export RELTYPE=mixing
 export LOSSRATIO=1
 
@@ -23,7 +23,6 @@ python train_graphLayer.py \
     --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
     --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_large_psd_4_1:1_mixing_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.pt \
     --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
