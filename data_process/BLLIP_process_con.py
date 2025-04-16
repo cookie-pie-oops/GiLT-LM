@@ -33,13 +33,17 @@ def _list_create(doc_path, dev_early_stop_each=500, test_early_stop_each=1000): 
         year_dir = os.path.join(doc_path, year)
         if not os.path.isdir(year_dir):
             continue
-        # 遍历每个子目录（dir_index）
+        # traverse the subdirectories
         for sub_dir in tqdm(os.listdir(year_dir), desc=f"Processing year {year}"): # sub_dir be like w7_001
             sub_dir_path = os.path.join(year_dir, sub_dir)
             if not os.path.isdir(sub_dir_path):
                 continue
             # print(f"  Processing subdir: {sub_dir}")
-            for file_name in os.listdir(sub_dir_path):
+            # sort files
+            # file_list = os.listdir(sub_dir_path)
+            
+            file_list = sorted(os.listdir(sub_dir_path))
+            for file_name in file_list:
                 file_path = os.path.join(sub_dir_path, file_name)
                 if not os.path.isfile(file_path):
                     continue
@@ -47,14 +51,13 @@ def _list_create(doc_path, dev_early_stop_each=500, test_early_stop_each=1000): 
                     lines = f.readlines()
                     full_content = "".join(
                         [line.replace("\t", " ").strip("\n") for line in lines])
-                    # 以"(S1"作为分割标记
+                    # `(S1` as the separator
                     origin_sentences = full_content.split("(S1")
                     for origin_sentence in origin_sentences:
                         origin_sentence = origin_sentence.strip()
                         if origin_sentence.strip() == "":
                             continue
                         complete_sentence = "(S1" + origin_sentence
-                        # 在这里进行解析，例如调用 constituency_parse 函数
                         # dataset_list.append(complete_sentence)
                         if sub_dir in dev_dirs and dev_cnt < dev_early_stop_each:
                             dev_list.append(complete_sentence)

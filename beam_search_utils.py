@@ -71,10 +71,11 @@ class BeamSearchDepthBased:
                     if atta_score.item() == float("-inf"):
                         continue
                     if atta_idx == 0:
-                        # if the attachment decision is 0, that's the whole sequence,
+                        # if the attachment decision is 0, that's reducing with the whole sequence,
                         # and we will handle this elsewhere
                         continue
-                    new_score += atta_score.item()
+                    # new_score += atta_score.item()
+                    candidate_score = new_score + atta_score.item()
                     # get the new attachment decisions
                     new_attachment_decisions = beam_obj.attachment_decisions + [atta_idx]
                     # check if we have seen this attachment decision before
@@ -82,11 +83,12 @@ class BeamSearchDepthBased:
                         continue
                     seen_preds.add(tuple(new_attachment_decisions))
                     # create a new beam object
-                    new_beam_obj = BeamObj(new_score, 
+                    new_beam_obj = BeamObj(candidate_score,
                                         beam_obj.score_seq + [
                                             (
                                                 scores_word[i].item(), 
-                                                scores_attach_time[i][atta_idx].item()
+                                                # scores_attach_time[i][atta_idx].item()
+                                                atta_score.item()
                                             )
                                         ],
                                         new_attachment_decisions, 

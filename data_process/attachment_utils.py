@@ -56,7 +56,7 @@ def get_constituent_labels(tree_tuple):
     get_len(tree_tuple, 0)
     return split_vals
 
-def compute_attachment_labels_text(parse, input_pieces, with_depth_info=False):
+def compute_attachment_labels_text(parse, input_pieces, with_depth_info=True):
     """
     given an input_str and its corresponding parse, return for each token in the input_str the earliest token
     in the input_str that the token wants to reduce with.

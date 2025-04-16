@@ -6,7 +6,6 @@ from model_bllip_con import PushdownTransformerConstituency
 import torch
 import numpy as np
 import sentencepiece as spm
-from config import ModelConfig, TrainConfig, ParallelConfig
 import logging
 import torch.nn as nn
 import json
@@ -14,31 +13,31 @@ import wandb
 import gc
 from itertools import chain
 from copy import copy
+from config import ModelConfig, AblationTrainConfig, DebugParallelConfig
 
-parser = argparse.ArgumentParser()
-# add: debug or not
-parser.add_argument("--debug", action="store_true", help="debug mode")
-args = parser.parse_args()
+# parser = argparse.ArgumentParser()
+# # add: debug or not
+# parser.add_argument("--debug", action="store_true", help="debug mode")
+# args = parser.parse_args()
 
 logging.basicConfig(
-    level=logging.INFO if not args.debug else logging.DEBUG,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 
-def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
+def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args: DebugParallelConfig):
     if parallel_args.parallel == 'ddp':
         raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
     # 0. load datasets
     train_dataset = HFDataset.load_from_disk(
         "./data/BLLIP_LG_train"
     )
+    # NOTE: ONLY 1/4 TRAINING DATA
+    train_dataset = train_dataset.select(range(0, len(train_dataset), 4))
     dev_dataset = HFDataset.load_from_disk(
         "./data/BLLIP_LG_dev"
     )
-    # test_dataset = HFDataset.load_from_disk(
-    #     "./data/BLLIP_LG_test"
-    # )
     
     # 1. load model
     # 1.1 set seed
@@ -482,13 +481,11 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         # logging.info("=" * 100)
 
     logging.info("=" * 100)
-
-    
     del model
     wandb.finish()
 
     
-def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig, rank: int, world_size: int):
+def main_ddp(model_args: ModelConfig, train_args, parallel_args, rank: int, world_size: int):
     raise NotImplementedError("Distributed Data Parallel (DDP) is not implemented yet.")
     # 0. load datasets
     train_dataset = HFDataset.load_from_disk(
@@ -507,12 +504,12 @@ def main_ddp(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Pa
 
 
 if __name__ == '__main__':
-    if args.debug:
+    if True:
         # debug mode
-        from config import DebugTrainConfig, DebugParallelConfig
-        model_args, train_args, parallel_args = ModelConfig(), DebugTrainConfig(), DebugParallelConfig() # adjust by editing py
+        from config import ModelConfig, AblationTrainConfig, DebugParallelConfig
+        model_args, train_args, parallel_args = ModelConfig(), AblationTrainConfig(), DebugParallelConfig() # adjust by editing py
     else:
-        model_args, train_args, parallel_args = ModelConfig(), TrainConfig(), ParallelConfig() # adjust by editing py
+        raise NotImplementedError("Only supporting debug mode.")
     # print args
     from dataclasses import asdict
     from pprint import pprint
