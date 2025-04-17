@@ -181,6 +181,8 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             
             # pad stack_tape using tensor operations
             stack_tensor = torch.tensor(item["stack_tape"], dtype=torch.long)
+            # NOTE: ablation: set as 0
+            stack_tensor = torch.zeros(stack_tensor.shape)
             # full matrix with pad_value_stack
             padded_tensor = torch.full((max_len, max_len), pad_value_stack, dtype=torch.long)
             # fill the upper left corner with stack_tensor

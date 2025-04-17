@@ -673,6 +673,8 @@ class AttachmentHead(nn.Module):
             logits_self,
             # (B, T, 1) -> (B, T, T+1)
         )
+        import pdb
+        pdb.set_trace()
 
 
         # 在 logits 的第一行前填充一行全 0，使其形状变为 (B, T+1, T+1)
@@ -693,6 +695,7 @@ class AttachmentHead(nn.Module):
         # 1 1 1 1 1
         logits = logits.masked_fill(mask == 0, float("-inf"))
         mask = mask.detach().cpu()
+        import pdb;pdb.set_trace()
 
         # 去掉最上面一行，返回 (B, T, T+1)
         return logits[:, 1:]
@@ -809,9 +812,10 @@ class PushdownTransformerConstituency(nn.Module):
         pos_emb = self.pos_emb(pos_seq)
         
         # DECODER ATTENTION MASK
+        
         dec_attn_mask = torch.triu(
             word_emb.new_ones(qlen, klen), diagonal=1+mlen).bool()[:,:,None] # FIXED: NOT .byte() ANYMORE but .bool()
-
+        import pdb;pdb.set_trace()
         # INITIAL HIDDEN STATE
         core_out = self.dropout(word_emb)
         pos_emb = self.dropout(pos_emb)

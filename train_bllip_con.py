@@ -251,7 +251,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
             attachment_labels = batch["attachment_labels"].to(device) # [B, T]
-            
+            import pdb;pdb.set_trace()
             # print shapes
             # logging.debug(f"batch size: {ids.shape[0]}")
             # logging.debug(f"length: {ids.shape[1]}")
