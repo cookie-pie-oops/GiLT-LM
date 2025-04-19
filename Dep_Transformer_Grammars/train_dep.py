@@ -64,6 +64,7 @@ parser.add_argument('--dropouth', default=0.0, type=float)
 parser.add_argument('--dropouto', default=0.5, type=float)
 parser.add_argument('--alpha', default=0.2, type=float)
 parser.add_argument('--beta', default=0.1, type=float)
+parser.add_argument('--finetune', default=None, type=str)
 
 def log_arguments(args):
 
@@ -171,6 +172,7 @@ def eval(data, startofword, model, length, args = None):
     total_loss = 0.0
     num_words = 0
     uas = 0
+    microf1 = 0
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -178,18 +180,33 @@ def eval(data, startofword, model, length, args = None):
             total_length = sum([len(sent) - 1 for sent in sents])
             mems = tuple()
             
-            ret = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, False, 
+            ret, prob = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, False, 
                         args.max_relative_length, args.min_relative_length)
-
+            if args.finetune == "sst2":
+                out = np.argmax(prob.cpu(), axis=1)
+                for j in range(len(sents)):
+                    idx = len(sents[j]) - 2
+                    if sents[j][idx] == 5987:
+                        if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
+                            microf1 += 1
+                    elif sents[j][idx] == 221:
+                        # if prob[idx - 1][221][j] > prob[idx - 1][5987][j]:
+                        if sents[j][idx] == out[idx-1][j].item():
+                            microf1 += 1
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
 
     ppl = np.exp(total_loss / num_words) 
     logger = get_logger()
-    logger.info(f"eval ppl {ppl:.4f}")
     model.train()
-    return ppl, uas
+    if args.finetune is None:
+        logger.info(f"eval ppl {ppl:.4f}")
+        return ppl, uas
+    elif args.finetune == "sst2":
+        microf1 = microf1 / num_sents
+        logger.info(f"eval f1 {microf1:.4f}")
+        return -microf1, uas
 
 def main(args):
     np.random.seed(args.seed)
@@ -249,6 +266,7 @@ def main(args):
         logger.info(f"loading model from {args.model_file}")
         checkpoint = torch.load(args.model_file)
         model = checkpoint['model']
+        # model.rel_embed = None
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
     
     nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
@@ -317,7 +335,7 @@ def main(args):
             mems = tuple()
             model : TransformerGrammar
             # print(startofword_train[i])
-            ret = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
+            ret, _ = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
                         args.max_relative_length, args.min_relative_length)
             
             if args.return_h:

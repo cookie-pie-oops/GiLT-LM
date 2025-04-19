@@ -2,28 +2,25 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_large_psd_4_mixing_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.out
+#SBATCH --output=graphlayer_small_psd_4_mixing_ACE_predict_ahead_sharelargecatpointer_fix_tanh.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
-# Test: 1. SG-test; 2. SDP parser
-# To do list: test fix ratio
-
 export DATASET=psd
-export DATASIZE=demo
+export DATASIZE=small
 export RELTYPE=mixing
-export LOSSRATIO=1
+export LOSSRATIO=0.4
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --train_arrow_file ../data_process/DTG_data/dtg_train_multiarrow.txt \
-    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
-    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.txt \
+    --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
+    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
+    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_sharelargecatpointer_fix_tanh.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_fix.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_sharelargecatpointer_fix_tanh.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \

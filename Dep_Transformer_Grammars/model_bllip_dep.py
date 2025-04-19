@@ -258,84 +258,62 @@ def has_cycle(adj_matrix):
 
 
 class MLPforBiaffine(nn.Module):
-    def __init__(self, inner_dim, input_dim, output_dim, concat_dim):
+    def __init__(self, input_dim, concat_dim, d_inner):
         super(MLPforBiaffine, self).__init__()
-
-        self.proj = nn.Linear(concat_dim, input_dim, bias=False)
-        self.L_1 = nn.Linear(input_dim, inner_dim)  # concat
-        self.L_2 = nn.Linear(inner_dim, output_dim)
-        self.layer_norm_input = nn.LayerNorm(output_dim)
-        # self.layer_norm_input = nn.LayerNorm(input_dim)
-        # self.dropout1 = nn.Dropout(0.1)
-        # self.dropout2 = nn.Dropout(0.1)
+        self.L_1 = nn.Linear(concat_dim, d_inner)
+        self.L_2 = nn.Linear(d_inner, 2*input_dim)
+        self.layer_norm_input = nn.LayerNorm(concat_dim)
 
         nn.init.kaiming_normal_(self.L_1.weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.L_1.bias)
-        nn.init.kaiming_normal_(self.L_2.weight, mode='fan_in', nonlinearity='relu')
-        nn.init.zeros_(self.L_2.bias)
-        # nn.init.kaiming_normal_(self.proj.weight, mode='fan_in', nonlinearity='relu')
-
         self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
     
     def forward(self, inp):
-        inp = self.proj(inp)
-        # inp = self.layer_norm_input(self.proj(inp))
-        x = self.L_1(inp)
-        x = self.relu(x)
-        # x = self.dropout1(x)
+        x = self.relu(self.L_1(self.layer_norm_input(inp)))
         x = self.L_2(x)
-        # x = self.dropout2(x)
-        return self.layer_norm_input(x)
-        # return x
+        return x
 
 class BiaffineAttention(nn.Module):
     def __init__(self, d_model, input_dim, embed_len, type="default"):
         super(BiaffineAttention, self).__init__()
-        # d_model = 1024
         self.input_dim = input_dim
-        self.proj_dim = 256
-        embed_len = [2 * i for i in embed_len]
         self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),    # degree, depth, distance, pred_depth (Not the same as the Transformer)
                 torch.nn.Embedding(151, embed_len[1]),
                 torch.nn.Embedding(151, embed_len[2]),
                 torch.nn.Embedding(151, embed_len[3])])
+        self.depth_embed2 = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),    # degree, depth, distance, pred_depth (Not the same as the Transformer)
+                torch.nn.Embedding(151, embed_len[1]),
+                torch.nn.Embedding(151, embed_len[2]),
+                torch.nn.Embedding(151, embed_len[3])])
 
-        # self.W = nn.Linear(self.proj_dim, self.proj_dim, bias=False)
-        # self.V = nn.Parameter(torch.Tensor(1, self.proj_dim))
-        # self.U = nn.Parameter(torch.Tensor(1, self.proj_dim))
-        # self.bias = nn.Parameter(torch.Tensor(1))
         self.type = type
         self.temperature = 1.0
-
         self.concat_dim = input_dim * 3
-        self.f_1 = MLPforBiaffine(d_model, input_dim, self.proj_dim, self.concat_dim)  #dot
-        self.concat_dim = input_dim * 2
-        self.f_2 = MLPforBiaffine(d_model, input_dim, self.proj_dim, self.concat_dim)  #dot
-        # self.f_1 = MLPforBiaffine(d_model, input_dim, input_dim) #ori
-        # self.f_2 = MLPforBiaffine(d_model, input_dim, input_dim) #ori
-        # self.proj1 = nn.Linear(input_dim, self.proj_dim, bias=False) #ori
-        # self.proj2 = nn.Linear(input_dim, self.proj_dim, bias=False) #ori
+        self.f_1 = MLPforBiaffine(input_dim, self.concat_dim, input_dim * 2)
+        self.f_2 = MLPforBiaffine(input_dim, self.concat_dim, self.concat_dim)
+        self.f_3 = MLPforBiaffine(input_dim, self.concat_dim, input_dim * 2)
+        self.f_4 = MLPforBiaffine(input_dim, self.concat_dim, self.concat_dim)
+        self.share_predicate = nn.Linear(2 * input_dim, 2 * input_dim)
+        self.share_argument = nn.Linear(2 * input_dim, 2 * input_dim)
+        self.share_argument_info = nn.Linear(input_dim, input_dim)
+        self.relu = nn.ReLU()
+        nn.init.kaiming_normal_(self.share_predicate.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.share_predicate.bias)
+        nn.init.kaiming_normal_(self.share_argument.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.share_argument.bias)
+        nn.init.kaiming_normal_(self.share_argument_info.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.share_argument_info.bias)
+        
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
             self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 2))
             self.softmax = nn.Sigmoid()
             nn.init.xavier_uniform_(self.root_representation)
-
-        # nn.init.xavier_normal_(self.W.weight)
-        # nn.init.xavier_normal_(self.U)
-        # nn.init.xavier_normal_(self.V)
-        # nn.init.kaiming_normal_(self.W.weight, mode='fan_in', nonlinearity='relu')
-        # nn.init.kaiming_normal_(self.U, mode='fan_in', nonlinearity='relu')
-        # nn.init.kaiming_normal_(self.V, mode='fan_in', nonlinearity='relu')
-        # nn.init.xavier_normal_(self.proj.weight)
-        # nn.init.zeros_(self.bias)
     
     def forward(self, input1, input2, attn_relpos): # 1*d, l*d
         if self.type == "Multi":
-            # B = input2.size(0)
-            # root_tokens = self.root_representation.repeat(B, 1, 1)
-            # input2 = torch.cat((root_tokens, input2), dim=1)
             B = input2.size(0)
             repeat_shape = list(input2.shape)
             repeat_shape[-1] = 1
@@ -344,24 +322,35 @@ class BiaffineAttention(nn.Module):
             input2 = torch.cat((root_tokens, input2), dim=input2.dim() - 2)
         attn_relpos = torch.clip(attn_relpos, 0, 150).long()
         embed_tuple = [self.depth_embed[i](attn_relpos[i]) for i in range(4)]
-        embed_biases = torch.cat(embed_tuple, dim = -1)
-        input1 = self.f_1(input1)   #b*1*d
-        input2 = self.f_2(input2 + embed_biases)   #b*l*d
-        # input1 = self.proj1(input1) #ori
-        # input2 = self.proj2(input2) #ori
-        # score = torch.einsum('b i d, b j d -> b i j', input1, input2)
-        score = input1 * input2
-        score = score.sum(dim = -1)
-        # H_2 = self.W(input2) # d*l
-        # score = torch.matmul(input1, H_2.transpose(input2.dim() - 2, input2.dim() - 1))  # b1d * bdl = b1l
+        embed_tuple2 = [self.depth_embed2[i](attn_relpos[i]) for i in range(4)]
+        embed_biases = torch.cat(embed_tuple, dim=-1)
+        embed_biases2 = torch.cat(embed_tuple2, dim=-1)
 
-        # score += torch.matmul(self.U, input1.transpose(input2.dim() - 2, input2.dim() - 1))  # 1d * bd1 = b11
-        # score += torch.matmul(self.V, input2.transpose(input2.dim() - 2, input2.dim() - 1))  # 1d * bdl = b1l
+        hidden1, hidden2, info = torch.chunk(input1, 3, dim=-1)
+        hidden1, hidden2 = torch.chunk(self.relu(self.share_predicate(torch.cat((hidden1, hidden2), dim=-1))), 2, dim=-1)
+        input1 = torch.cat((hidden1, hidden2, info), dim=-1)
 
-        # score += self.bias  # b,1,l
-        score = score.to(torch.float64)
-        score = self.softmax(score / self.temperature) 
-        return score
+        input2 = self.relu(self.share_argument(input2))
+        embed_biases = self.relu(self.share_argument_info(embed_biases))
+        embed_biases2 = self.relu(self.share_argument_info(embed_biases2))
+        left_input2 = torch.cat((input2, embed_biases), dim=-1)
+        right_input2 = torch.cat((input2, embed_biases2), dim=-1)
+
+        left_input1 = self.f_1(input1)   #b*1*d
+        left_input2 = self.f_2(left_input2)   #b*l*d
+        right_input1 = self.f_3(input1)   #b*1*d
+        right_input2 = self.f_4(right_input2)   #b*l*d
+
+        left_score = left_input1 * left_input2
+        right_score = right_input1 * right_input2
+        left_score = left_score.sum(dim = -1)
+        right_score = right_score.sum(dim = -1)
+
+        left_score = left_score.to(torch.float64)
+        left_score = self.softmax(left_score / self.temperature)
+        right_score = right_score.to(torch.float64)
+        right_score = self.softmax(right_score / self.temperature)
+        return left_score, right_score
     
     def set_temperature(self, value):
         self.temperature = value
@@ -749,6 +738,8 @@ class TransformerGrammar(nn.Module):
                 torch.nn.Embedding(151, depth_len),
                 torch.nn.Embedding(151, predepth_len)])
             assert self.n_head * self.d_head == degree_len + distance_len + depth_len + predepth_len
+        else:
+            self.rel_embed = None
         for _ in range(num_layers):
             self.layers.append(TransformerGrammarLayer(n_head, w_dim, d_head, 
                                 d_inner, dropout, dropoutatt, tgt_len = None, 
@@ -1269,7 +1260,7 @@ class TransformerGrammar(nn.Module):
                 # return loss, hiddens[9] + hiddens[15]
             return loss, core_out
         else:
-            return loss
+            return loss, prob
 
     
     def GraphlayerLM_inference(self, x, past_keys, past_values, attn_relpos = None):
