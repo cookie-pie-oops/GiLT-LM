@@ -170,7 +170,6 @@ if __name__ == "__main__":
             data = f.readlines()
             sample_list = [json.loads(ds.strip()) for ds in data]
         sample_list = random.sample(sample_list, int(len(sample_list) / 10))
-        print(len(sample_list))
         logger.info(file[:-6])
         acc = 0.0
         for idx in tqdm(range(len(sample_list))):
