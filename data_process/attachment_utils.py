@@ -73,7 +73,10 @@ def compute_attachment_labels_text(parse, input_pieces, with_depth_info=True):
 
     if with_depth_info, then along with type labels, return the number of reduce operations that have been performed.
     """
-
+    # print(input_pieces)
+    # print(parse)
+    # print(type(parse))
+    # exit()
     stack_actions = get_shift_reduce_actions(parse)
 
     if type(parse) == Tree:
