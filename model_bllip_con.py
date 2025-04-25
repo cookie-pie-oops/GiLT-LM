@@ -361,7 +361,6 @@ class PushdownMultiHeadAttn(nn.Module):
             
             # NEW
             attn_score = AC + BD + table_AC_depth.gather(1, stack_tape.unsqueeze(-1).expand(-1, -1, -1, self.n_head)) # shape [qlen, klen, bsz, n_head] = [T, T', B, n_head]
-            
             attn_score.mul_(self.scale)
         else:
             # stack_tape: [bsz, qlen, klen] = [B, T, T'], stack_tape[b][i][j] -> d_{i,j} in batch b
@@ -390,23 +389,12 @@ class PushdownMultiHeadAttn(nn.Module):
             # [qlen x klen x bsz x n_head]
             attn_score = AC + BD
             attn_score.mul_(self.scale)
-        try:
-            if attn_mask is not None and attn_mask.any().item():
-                if attn_mask.dim() == 2:
-                    attn_score.masked_fill_(attn_mask[None,:,:,None], -float('inf'))
-                elif attn_mask.dim() == 3:
-                    attn_score.masked_fill_(attn_mask[:,:,:,None], -float('inf'))
-        except Exception as e:
-            # print shapes
-            print("attn_score: ", attn_score.shape)
-            print("attn_mask: ", attn_mask.shape)
-            print("w: ", w.shape)
-            print("r: ", r.shape)
-            print("r_w_bias: ", r_w_bias.shape)
-            print("r_r_bias: ", r_r_bias.shape)
-            print("stack_tape: ", stack_tape.shape)
-            raise e
-            
+        if attn_mask is not None and attn_mask.any().item():
+            if attn_mask.dim() == 2:
+                attn_score.masked_fill_(attn_mask[None,:,:,None], -float('inf'))
+            elif attn_mask.dim() == 3:
+                attn_score.masked_fill_(attn_mask[:,:,:,None], -float('inf'))
+        # breakpoint()
 
         # [qlen x klen x bsz x n_head]
         attn_prob = F.softmax(attn_score, dim=1)
@@ -781,7 +769,8 @@ class PushdownTransformerConstituency(nn.Module):
                 stack_tape,
                 attachment_labels,
                 mems=None, 
-                return_h=False):
+                return_h=False,
+                only_w=False):
         
         # data: x, shape [B, T], ids of tokens seq[:T] where len(seq) = T+1
         # target: y = seq[1:T+1], shape [B, T], ids of tokens seq[1:T+1]
@@ -833,6 +822,10 @@ class PushdownTransformerConstituency(nn.Module):
         core_out = self.dropout(core_out) # shape [T, B, d_model] # h1, h2, ..., hT
         # PROJECTION
         logits = self.projection(core_out) # shape [T, B, vocab_size]    
+        if only_w:
+            # breakpoint()
+            loss_words = F.cross_entropy(logits.reshape(-1, self.vocab_size), target.reshape(-1), ignore_index=self.pad_id, reduction='sum')
+            return loss_words
         # ATTACHMENT HEAD
         # NOTE: Though in inference, we needs the logits to predict next_word, here we use target directly in training
         next_word = self.emb(target) # shape [T, B, embd_dim] # x2, x3, ..., xT+1

@@ -34,7 +34,10 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
         "./data/BLLIP_LG_train"
     )
     # NOTE: ONLY 1/4 TRAINING DATA
-    train_dataset = train_dataset.select(range(0, len(train_dataset), 4))
+    # shuffle
+    # train_dataset = train_dataset.shuffle(seed=train_args.seed)
+    train_dataset = train_dataset.select(range(0, len(train_dataset)//4))
+    train_dataset.shuffle(seed=train_args.seed)
     dev_dataset = HFDataset.load_from_disk(
         "./data/BLLIP_LG_dev"
     )
@@ -47,6 +50,7 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
     torch.manual_seed(train_args.seed)
     torch.cuda.manual_seed_all(train_args.seed)
     # torch.backends.cudnn.deterministic = True
+    # np.random.shuffle(train_dataset)
     
     # 1.2 set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,7 +132,8 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             torch.optim.lr_scheduler.LinearLR(optimizer, 
                                               start_factor=train_args.start_lr / train_args.max_lr,
                                               total_iters=train_args.warmup_steps // train_args.gradient_accumulation_steps),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // (train_args.batch_size * train_args.gradient_accumulation_steps), train_args.epochs),
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // (train_args.batch_size * train_args.gradient_accumulation_steps)
+                                                                            - train_args.warmup_steps // train_args.gradient_accumulation_steps, train_args.epochs),
                                                        eta_min=train_args.eta_min)
         ],
         milestones=[train_args.warmup_steps // train_args.gradient_accumulation_steps], # this is the step when the first scheduler will be used
@@ -149,7 +154,7 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
         idxs = []
         
         pad_id = model_args.pad_id  # pad_id: 0 for spm vocab
-        pad_value_stack = model_args.max_stack_depth - 1  # stack_tape 的 pad 值: max_depth - 1 (-100 will cause index error, and ?0 has been occupied?)
+        pad_value_stack = 0  # stack_tape 的 pad 值: max_depth - 1 (-100 will cause index error, and ?0 has been occupied?)
         pad_value_att = model_args.stack_pad_id    # attachment_labels 的 pad 值: -100 (0 has been occupied)
         
         # for item in batch:
@@ -175,8 +180,9 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             T = len(item["ids"])
             lengths.append(T)
             idxs.append(item.get("idx", 0))
-            
+            # breakpoint()
             # ids padding -> max_len
+            assert not (pad_id in item["ids"]), f"pad_id {pad_id} in ids {item['ids']}"
             padded_ids.append(item["ids"] + [pad_id] * (max_len - T))
             
             # pad stack_tape using tensor operations
@@ -187,7 +193,13 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             padded_tensor = torch.full((max_len, max_len), pad_value_stack, dtype=torch.long)
             # fill the upper left corner with stack_tensor
             padded_tensor[:T, :T] = stack_tensor
+            # padded_tensor = torch.zeros(padded_tensor.shape)
+            # # dtype int64
+            # padded_tensor = padded_tensor.type(torch.long)
             padded_stack_tape.append(padded_tensor) # so padded_stack_tape is a list of tensors
+            # print(padded_tensor.sum())
+            # 0 padded tensor
+            
             
             # attachment_labels 的 padding
             padded_attachment_labels.append(item["attachment_labels"] + [pad_value_att] * (max_len - T))
@@ -251,6 +263,8 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
 
             # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
+            # all 0
+            assert stack_tape.sum() == 0, f"stack_tape sum: {stack_tape.sum()}"
             attachment_labels = batch["attachment_labels"].to(device) # [B, T]
             
             # print shapes
@@ -262,14 +276,18 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             # logging.debug(f"attachment_labels shape: {attachment_labels.shape}")
             
             # 3.3.2 forward
-            loss_w, loss_a = model.forward(
-                data,
-                target,
-                stack_tape,
-                attachment_labels,
-            ) # summed loss
-            loss_w = loss_w.sum()
-            loss_a = loss_a.sum()
+            # NOTE: ABLATION SO WE ONLY HAVE LOSS_W
+            loss_w = model.forward(
+                data, target, stack_tape, attachment_labels, only_w=True
+            )
+            # loss_w, loss_a = model.forward(
+            #     data,
+            #     target,
+            #     stack_tape,
+            #     attachment_labels,
+            # ) # summed loss
+            # loss_w = loss_w.sum()
+            # loss_a = loss_a.sum()
             # back to cpu
             
             
@@ -277,7 +295,7 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             # if torch.isnan(loss_w).any() or torch.isnan(loss_a).any():
             #     raise ValueError("Loss is NaN")
             
-            loss = (loss_w + train_args.attachment_ratio * loss_a) / (1 + train_args.attachment_ratio)
+            # loss = (loss_w + train_args.attachment_ratio * loss_a) / (1 + train_args.attachment_ratio)
             # 3.3.3 backward
             # divide by grad_accumulation_steps
             # in place
@@ -298,7 +316,8 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             # print(f"Reserved GPU MEMORY: {torch.cuda.memory_reserved() / (1024**2):.2f} MB")
             torch.cuda.empty_cache()
             # print(loss.sum())
-            loss.backward() # NOTE: WE DON'T NEED TO DIVIDE BY SUM OF LENGTHS IN BACKWARD otherwise the scale <<1
+            
+            loss_w.backward()
             
             
             
@@ -336,12 +355,14 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
             # print
             # torch.set_grad_enabled(False)
             loss_w = loss_w.detach().cpu()
-            loss_a = loss_a.detach().cpu()
-            loss = loss.detach().cpu()
+            # loss_a = loss_a.detach().cpu()
+            loss_a = torch.tensor(0.0)
+            loss = loss_w
             
             # no need grad from now on
             with torch.no_grad():
                 sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
+                assert sum_of_seq_lengths_item == torch.sum(target != model_args.pad_id).item(), f"sum_of_seq_lengths_item: {sum_of_seq_lengths_item}, target: {target}"
                 if (general_step + 1) % train_args.log_interval == 0:
                     
                     logging.info("=" * 100)
@@ -395,7 +416,7 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
                 # logging.info(f"Decoded pieces: {sp.id_to_piece(list(chain(*[ids[i].tolist() for i in range(ids.shape[0])])))}")
                 # logging.info(f"Ids: {list(chain(*[ids[i].tolist() for i in range(ids.shape[0])]))}")
                 # logging.info(f"Attachment labels: {list(chain(*[attachment_labels[i].tolist() for i in range(attachment_labels.shape[0])])) if attachment_labels is not None else []}")
-                del target, data, stack_tape, attachment_labels
+                del target, data, stack_tape, attachment_labels, ids, batch
                 
                 # eval w/ dev set
                 # if best then save
@@ -407,30 +428,39 @@ def main(model_args: ModelConfig, train_args: AblationTrainConfig, parallel_args
                     eval_losses_w = []
                     eval_losses_a = []
                     n_words = 0
+                    n_words_2 = 0
                     for _, eval_batch in enumerate(dev_dataloader):
                         ids = eval_batch["ids"]
                         ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id), ids], dim=1)
                         target = ids[:, 1:].to(device)
                         data = ids[:, :-1].to(device)
                         stack_tape = eval_batch["stack_tape"].to(device)
+                        # assert 0
+                        assert stack_tape.sum() == 0, f"stack_tape sum: {stack_tape.sum()}"
                         attachment_labels = eval_batch["attachment_labels"].to(device)
                         # forward
-                        loss_w, loss_a = model.forward(
+                        loss_w = model.forward(
                             data,
                             target,
                             stack_tape,
                             attachment_labels,
+                            only_w=True
                         )
                         data, target, stack_tape, attachment_labels = data.detach().cpu(), target.detach().cpu(), stack_tape.detach().cpu(), attachment_labels.detach().cpu()
                         loss_w = loss_w.detach().cpu().sum()
-                        loss_a = loss_a.detach().cpu().sum()
+                        # loss_a = loss_a.detach().cpu().sum()
+                        loss_a = torch.tensor(0.0)
                         eval_losses_w.append(loss_w.item())
                         eval_losses_a.append(loss_a.item())
                         n_words += torch.sum(eval_batch["lengths"]).item()
+                        n_words_2 += torch.sum(target != model_args.pad_id).item()
                     eval_loss_w_sum = np.sum(eval_losses_w)
                     eval_loss_a_sum = np.sum(eval_losses_a)
                     # sum_of_all_seq_lengths = np.sum([torch.sum(eval_batch["lengths"]).item() for eval_batch in dev_dataloader])
                     # assert sum_of_all_seq_lengths == n_words, f"sum_of_all_seq_lengths: {sum_of_all_seq_lengths}, n_words: {n_words}"
+                    
+                    # assert the # of non-mask(0) ids in target == n_words
+                    assert n_words_2 == n_words, f"target: {n_words_2}, n_words: {n_words}"
                     eval_loss_w = eval_loss_w_sum / n_words
                     eval_loss_a = eval_loss_a_sum / n_words
                     eval_loss = eval_loss_w + eval_loss_a

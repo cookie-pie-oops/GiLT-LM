@@ -129,7 +129,8 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             torch.optim.lr_scheduler.LinearLR(optimizer, 
                                               start_factor=train_args.start_lr / train_args.max_lr,
                                               total_iters=train_args.warmup_steps // train_args.gradient_accumulation_steps),
-            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // (train_args.batch_size * train_args.gradient_accumulation_steps), train_args.epochs),
+            torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(train_args.epochs * len(train_dataset) // (train_args.batch_size * train_args.gradient_accumulation_steps)
+                                                                            - train_args.warmup_steps // train_args.gradient_accumulation_steps, train_args.epochs),
                                                        eta_min=train_args.eta_min)
         ],
         milestones=[train_args.warmup_steps // train_args.gradient_accumulation_steps], # this is the step when the first scheduler will be used
@@ -150,7 +151,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
         idxs = []
         
         pad_id = model_args.pad_id  # pad_id: 0 for spm vocab
-        pad_value_stack = model_args.max_stack_depth - 1  # stack_tape 的 pad 值: max_depth - 1 (-100 will cause index error, and ?0 has been occupied?)
+        pad_value_stack = 0  # stack_tape 的 pad 值: max_depth - 1 (-100 will cause index error, and ?0 has been occupied?)
         pad_value_att = model_args.stack_pad_id    # attachment_labels 的 pad 值: -100 (0 has been occupied)
         
         # for item in batch:
@@ -190,8 +191,6 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             
             # attachment_labels 的 padding
             padded_attachment_labels.append(item["attachment_labels"] + [pad_value_att] * (max_len - T))
-
-        
         # to tensor
         
         batch_ids = torch.tensor(padded_ids, dtype=torch.long) # shape: [batch_size, max_len]
@@ -251,6 +250,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             # stack_tape is already padded in collate_fn
             stack_tape = batch["stack_tape"].to(device) # [B, T, T]
             attachment_labels = batch["attachment_labels"].to(device) # [B, T]
+            # breakpoint()
             # import pdb;pdb.set_trace()
             # print shapes
             # logging.debug(f"batch size: {ids.shape[0]}")
@@ -341,6 +341,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             # no need grad from now on
             with torch.no_grad():
                 sum_of_seq_lengths_item = torch.sum(batch["lengths"]).item()
+                assert sum_of_seq_lengths_item == torch.sum(target != model_args.pad_id).item(), f"sum_of_seq_lengths_item: {sum_of_seq_lengths_item}, target: {target}"
                 if (general_step + 1) % train_args.log_interval == 0:
                     
                     logging.info("=" * 100)
@@ -394,7 +395,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                 # logging.info(f"Decoded pieces: {sp.id_to_piece(list(chain(*[ids[i].tolist() for i in range(ids.shape[0])])))}")
                 # logging.info(f"Ids: {list(chain(*[ids[i].tolist() for i in range(ids.shape[0])]))}")
                 # logging.info(f"Attachment labels: {list(chain(*[attachment_labels[i].tolist() for i in range(attachment_labels.shape[0])])) if attachment_labels is not None else []}")
-                del target, data, stack_tape, attachment_labels
+                del target, data, stack_tape, attachment_labels, ids, batch
                 
                 # eval w/ dev set
                 # if best then save

@@ -14,7 +14,7 @@ class ModelConfig:
     eos_id: int = 2
     stack_pad_id: int = -100
     pre_lnorm: bool = False
-    max_stack_depth: int = 150
+    max_stack_depth: int = 50
     
     
 @dataclass
@@ -96,7 +96,7 @@ class DebugTrainConfig:
     
 @dataclass
 class AblationTrainConfig:
-    run_name = "push_bllip_con_test_gas4_ablation"
+    run_name = "push_bllip_con_test_gas4_ablation_no_attach_loss"
     seed: int = 12345
     proposed_batch_size: int = 64
     num_workers: int = 0
@@ -113,7 +113,7 @@ class AblationTrainConfig:
     
     max_grad_norm: float = 3.0
     # GAS
-    gradient_accumulation_steps: int = 4 # grad_accumulation_steps * real_batch_size = 64
+    gradient_accumulation_steps: int = 1 # grad_accumulation_steps * real_batch_size = 64
     log_interval: int = 25 * gradient_accumulation_steps # debug: 1, normal: 50
     eval_interval: int = 125 * gradient_accumulation_steps # debug: 1, normal: 250
     
