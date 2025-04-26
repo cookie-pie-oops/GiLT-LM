@@ -2,7 +2,7 @@
 #SBATCH -t 2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_large_psd_4_mixing_DTG_predict_ahead_4newmix_dyn_embed_relonpointer_sampling.out
+#SBATCH --output=graphlayer_large_psd_4_mixing_ACE_predict_ahead_graph_rel_split_sampling.out
 export DATASET=psd
 export RELTYPE=mixing
 export EVALTYPE=estimate    #estimate
@@ -12,14 +12,14 @@ export EVALTYPE=estimate    #estimate
 python eval_model.py \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --dev_arrow_file ../data_process/DTG_data/dtg_dev_multiarrow.txt \
-    --test_arrow_file ../data_process/DTG_data/dtg_test_multiarrow_300.txt \
+    --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
+    --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow_900.txt \
     --log_file logs/eval.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_large_$DATASET\_4_1:-1_$RELTYPE\_DTG_predict_ahead_4newmix_dyn_embed_relonpointer.pt \
+    --model_file models/graphlayer_small_$DATASET\_4_1:0.8_$RELTYPE\_ACE_predict_ahead_graph_rel_split.pt \
     --eval_type $EVALTYPE \
-    --sampling_num 300 \
-    --eval_batch_size 100 \
+    --sampling_num 900 \
+    --eval_batch_size 60 \
     --degree_len 400 \
     --distance_len 400 \
     --depth_len 150 \

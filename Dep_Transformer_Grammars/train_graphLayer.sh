@@ -2,14 +2,14 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_mixing_ACE_predict_ahead_sharelargecatpointer_fix_tanh.out
+#SBATCH --output=graphlayer_small_psd_4_mixing_ACE_predict_ahead_graph_rel_split_5_embedknet.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 export DATASET=psd
 export DATASIZE=small
 export RELTYPE=mixing
-export LOSSRATIO=0.4
+export LOSSRATIO=0.2
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
@@ -18,9 +18,9 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
     --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_sharelargecatpointer_fix_tanh.txt \
+    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_graph_rel_split_5_embedknet.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_sharelargecatpointer_fix_tanh.pt \
+    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_graph_rel_split_5_embedknet.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \

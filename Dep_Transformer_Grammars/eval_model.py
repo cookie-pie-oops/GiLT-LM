@@ -282,7 +282,7 @@ def weights_init(m):
             nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
 
 def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
-    left_biaffine_model, right_biaffine_model, length, epsilon = 0, args = None, vocab = None):
+    biaffine_model, length, epsilon = 0, args = None, vocab = None):
     model.eval()
     num_sents = 0
     total_loss = 0.0
@@ -300,6 +300,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     acc_num = 0
     infer_num = 0
     label_num = 0
+    crit = nn.BCELoss(reduction="none")
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -316,7 +317,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             # sents[0][-30:]=[0]*30
             # sents[0][-30]=2
             # The Blair & Co. is close to an agreement to sell its TV station advertising representation operation and program production unit to an investor group led by James H. Rosenfield , a former CBS Inc. executive , industry sources said .
-            ret, hidden, word_emb, attn_relpos_for_pointer = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
+            ret, hidden, word_emb, attn_relpos_for_pointer, _ = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, True, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id, 
                         sents_arrow=[sents_left_arrow, sents_right_arrow], iseval=True, rel_type=args.rel_type)
 
@@ -329,37 +330,32 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
             biaffine_loss = 0
             batch_input1 = []
-            batch_input2 = []
-            batch_left_labels = []
-            batch_right_labels = []
-            batch_mask = []
-            batch_attn = []
+            batch_labels = []
             if [left_arrow, right_arrow]:
                 for i, (sent_ids, sent_hidden, sent_index_to_id, predicates_input, arguments_input, sent_left_label, sent_right_label, sent_attn_relpos) in enumerate(zip(
                     sents, hidden, sents_index_to_id, batch_predicates_input, batch_arguments_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer)):
                     sent_biaffine_loss = 0
-                    input1 = []
                     max_word_length = max(sent_index_to_id)
-                    words_piece_input = torch.stack(arguments_input)
-                    input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
-                    left_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
-                    right_labels = torch.zeros(max_word_length, max_word_length + 1).to(words_piece_input.device)
-                    if vocab is not None:
-                        logger.info("\nsentence: {}".format(" ".join([vocab[i] for i in sent_ids])))
-                    for j in range(len(sent_ids)):
-                        if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
-                            words_index = sent_index_to_id[j]
-                            predicate_input = predicates_input[words_index - 1]
+                    labels = torch.zeros(max_word_length + 1, max_word_length + 1).to(hidden.device)
+                    for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
+                        labels[idx + 1, right_label] = 1
+                        labels[left_label, idx + 1] = 1
+                    # if vocab is not None:
+                    #     logger.info("\nsentence: {}".format(" ".join([vocab[i] for i in sent_ids])))
+                    # for j in range(len(sent_ids)):
+                    #     if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
+                    #         words_index = sent_index_to_id[j]
+                    #         predicate_input = predicates_input[words_index - 1]
 
-                            left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
-                            right_gt = sent_right_label[words_index - 1]
+                    #         left_gt = sent_left_label[words_index - 1]    # start from 0, 0 means root, word start from 1
+                    #         right_gt = sent_right_label[words_index - 1]
                             
-                            input1.append(predicate_input.view(1, -1))
+                    #         input1.append(predicate_input.view(1, -1))
 
-                            if left_gt:
-                                left_labels[words_index - 1][left_gt] = 1
-                            if right_gt:
-                                right_labels[words_index - 1][right_gt] = 1
+                    #         if left_gt:
+                    #             left_labels[words_index - 1][left_gt] = 1
+                    #         if right_gt:
+                    #             right_labels[words_index - 1][right_gt] = 1
 
                             # # left_gt_tensor = torch.zeros(words_index).double().to(words_piece_input.device)
                             # if not left_gt:
@@ -389,16 +385,18 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             # #     import pdb;pdb.set_trace()
                             # #     raise ValueError("Biaffine loss is Inf.")
                             # # biaffine_loss -= torch.sum(torch.log(left_logits[left_gt])) + torch.sum(torch.log(right_logits[right_gt]))
-                    if input1:
-                        input1 = torch.stack(input1)
-                        mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:].to(input1.device)
+                    if predicates_input:
+                        input1 = torch.stack(predicates_input).unsqueeze(0)
+                        labels = labels[:,1:].unsqueeze(0)
+                        # mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:].to(input1.device)
                         if args.eval_type != "estimate":
-                            inv_left_labels = mask - left_labels
-                            inv_right_labels = mask - right_labels
-                            left_logits = left_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
-                            right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
-                            sent_biaffine_loss += - torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels)) - torch.sum(torch.log(left_logits.mul(left_labels) + epsilon).mul(left_labels))
-                            sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
+                            # inv_left_labels = mask - left_labels
+                            # inv_right_labels = mask - right_labels
+                            scores = biaffine_model(input1, sent_attn_relpos.unsqueeze(1))
+                            # left_logits, right_logits = left_logits.squeeze(), right_logits.squeeze()
+                            # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
+                            sent_biaffine_loss = crit(scores, labels).sum()
+                            # sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
                             
                             # output logits and label
                             # if left_logits.dim() == 1:
@@ -414,54 +412,39 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             #     logger.info(f"{row}: {row_str}\tgt:{sent_right_label[row]}")
                             # logger.info(f"{(sent_biaffine_loss.item() / (len(sent_ids) - 1)):.4f}")
                             
-                            left_pred = torch.nonzero(left_logits*mask > 0.5, as_tuple=False)  # start from 0, 0 means root, word start from 1
-                            right_pred = torch.nonzero(right_logits*mask > 0.5, as_tuple=False) 
-                            left_label_nonzero = torch.nonzero(left_labels, as_tuple=False)
-                            right_label_nonzero = torch.nonzero(right_labels, as_tuple=False)
+                            pred = torch.nonzero(scores > 0.5, as_tuple=False)
+                            label_nonzero = torch.nonzero(labels, as_tuple=False)
 
-                            label_num += len(left_label_nonzero)
-                            label_num += len(right_label_nonzero)
-                            
-                            infer_num += len(left_pred) + len(right_pred)
-
-                            for pred_row in left_pred:
-                                for label_row in left_label_nonzero:
-                                    if torch.equal(pred_row, label_row):
-                                        acc_num += 1
-                            for pred_row in right_pred:
-                                for label_row in right_label_nonzero:
+                            label_num += len(label_nonzero)
+                            infer_num += len(pred)
+                            for pred_row in pred:
+                                for label_row in label_nonzero:
                                     if torch.equal(pred_row, label_row):
                                         acc_num += 1
                         else:
                             batch_input1.append(input1)
-                            batch_input2.append(input2)
-                            batch_left_labels.append(left_labels)
-                            batch_right_labels.append(right_labels)
-                            batch_mask.append(mask)
-                            batch_attn.append(sent_attn_relpos)
+                            batch_labels.append(labels)
                     if args.eval_type != "estimate":
                         ret[i] += sent_biaffine_loss
             num_sents += batch_size
 
             if args.eval_type == "estimate":
                 batch_input1 = torch.stack(batch_input1)
-                batch_input2 = torch.stack(batch_input2)
-                batch_left_labels = torch.stack(batch_left_labels)
-                batch_right_labels = torch.stack(batch_right_labels)
-                batch_mask = torch.stack(batch_mask)
-                batch_attn = torch.stack(batch_attn)
-                batch_attn = batch_attn.permute(1, 0, 2, 3)
-                left_logits = left_biaffine_model(batch_input1, batch_input2, batch_attn).squeeze()
-                right_logits = right_biaffine_model(batch_input1, batch_input2, batch_attn).squeeze()
-                if left_logits.dim() == 2:
-                    left_logits = left_logits.unsqueeze(1)
-                    right_logits = right_logits.unsqueeze(1)
-                inv_left_labels = batch_mask - batch_left_labels
-                inv_right_labels = batch_mask - batch_right_labels
-                biaffine_ret = -torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels), dim=(1,2))
-                biaffine_ret += -torch.sum(torch.log(left_logits.mul(batch_left_labels) + epsilon).mul(batch_left_labels), dim=(1,2))
-                biaffine_ret += -torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels), dim=(1,2))
-                biaffine_ret += -torch.sum(torch.log(right_logits.mul(batch_right_labels) + epsilon).mul(batch_right_labels), dim=(1,2))
+                batch_labels = torch.stack(batch_labels)
+                batch_attn = torch.stack(attn_relpos_for_pointer).permute(1, 0, 2, 3)
+                scores = biaffine_model(batch_input1.squeeze(1), batch_attn)
+                # left_logits, right_logits = left_logits.squeeze(), right_logits.squeeze()
+                # right_logits = right_biaffine_model(batch_input1, batch_input2, batch_attn).squeeze()
+                # if left_logits.dim() == 2:
+                #     left_logits = left_logits.unsqueeze(1)
+                #     right_logits = right_logits.unsqueeze(1)
+                # inv_left_labels = batch_mask - batch_left_labels
+                # inv_right_labels = batch_mask - batch_right_labels
+                # biaffine_ret = -torch.sum(torch.log((1-left_logits).mul(inv_left_labels) + epsilon).mul(inv_left_labels), dim=(1,2))
+                # biaffine_ret += -torch.sum(torch.log(left_logits.mul(batch_left_labels) + epsilon).mul(batch_left_labels), dim=(1,2))
+                # biaffine_ret += -torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels), dim=(1,2))
+                # biaffine_ret += -torch.sum(torch.log(right_logits.mul(batch_right_labels) + epsilon).mul(batch_right_labels), dim=(1,2))
+                biaffine_ret = crit(scores, batch_labels.squeeze(1)).sum(dim=(1,2))
                 ret = ret + biaffine_ret
                 if count_num <= eval_epoch - 1:
                     setence_possible += np.sum(np.exp(-ret.to('cpu').numpy().astype(np.float64)))
@@ -485,7 +468,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                     num_words += sentence_length
                     logger.info(f"ori ppl {ori_ppl:.4f}")
             else:
-                total_loss_with_biaffine += ret.sum().item()          
+                total_loss_with_biaffine += ret.sum().item()   
     
     ppl = np.exp(total_loss / num_words) 
     ppl_biaffine = np.exp(total_loss_with_biaffine / num_words)     
@@ -583,39 +566,39 @@ def main(args):
         else:
             checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'))
         model = checkpoint['model']
-        left_biaffine_model = checkpoint['left_biaffine_model']
-        right_biaffine_model = checkpoint['right_biaffine_model']
+        biaffine_model = checkpoint['biaffine_model']
+        # right_biaffine_model = checkpoint['right_biaffine_model']
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
     
     if torch.cuda.is_available():
         model.cuda()
-        left_biaffine_model.cuda()
-        right_biaffine_model.cuda()
+        biaffine_model.cuda()
+        # right_biaffine_model.cuda()
     model.eval()
-    left_biaffine_model.eval()
-    right_biaffine_model.eval()
+    biaffine_model.eval()
+    # right_biaffine_model.eval()
 
-    left_biaffine_model.set_temperature(1.0)
-    right_biaffine_model.set_temperature(1.0)
+    biaffine_model.set_temperature(1.0)
+    # right_biaffine_model.set_temperature(1.0)
 
     if args.eval_type != "estimate":
         logger.info(f"------")
         logger.info(f"DEV SET\n")
         # logger.info(f"epsilon = 0:")       
-        # val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model, left_biaffine_model, right_biaffine_model, dev_length, epsilon = 0, args=args)
+        # val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model, biaffine_model, right_biaffine_model, dev_length, epsilon = 0, args=args)
 
         logger.info(f"epsilon = 1e-323:")       
         val_ppl, val_uas = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model,
-            left_biaffine_model, right_biaffine_model, dev_length, epsilon = 1e-323, args=args, vocab=None)
+            biaffine_model, dev_length, epsilon = 1e-323, args=args, vocab=None)
 
     logger.info(f"------")
     logger.info(f"TEST SET\n")
     # logger.info(f"epsilon = 0:")
-    # test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, left_biaffine_model, right_biaffine_model, test_length, epsilon = 0, args=args)
+    # test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, biaffine_model, right_biaffine_model, test_length, epsilon = 0, args=args)
 
     logger.info(f"epsilon = 1e-323:")
     test_ppl, test_uas = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model,
-        left_biaffine_model, right_biaffine_model, test_length, epsilon = 1e-323, args=args, vocab=None)
+        biaffine_model, test_length, epsilon = 1e-323, args=args, vocab=None)
  
     logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
     

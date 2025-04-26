@@ -9,7 +9,7 @@ import time
 import json
 from torch import cuda
 from helping_utils.logger import configure_logger, get_logger
-from model_bllip_dep import TransformerGrammar
+from model_bllip_dep import TransformerGrammar, find_label_idx
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_file', default='data/train_LG_bllip_action.csv', type=str)
@@ -173,6 +173,9 @@ def eval(data, startofword, model, length, args = None):
     num_words = 0
     uas = 0
     microf1 = 0
+    pre = 0
+    infer = 0
+    label = 0
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -183,16 +186,48 @@ def eval(data, startofword, model, length, args = None):
             ret, prob = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, False, 
                         args.max_relative_length, args.min_relative_length)
             if args.finetune == "sst2":
+                # 26858,5599 -> 2056: positive 2060: negative
                 out = np.argmax(prob.cpu(), axis=1)
                 for j in range(len(sents)):
-                    idx = len(sents[j]) - 2
-                    if sents[j][idx] == 5987:
-                        if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
+                    idx = find_label_idx(sents[j], [26858, 5599]) + 1
+                    if sents[j][idx + 1] == 2060:   # 0
+                        if prob[idx][2056][j] < prob[idx][2060][j]:
                             microf1 += 1
-                    elif sents[j][idx] == 221:
-                        # if prob[idx - 1][221][j] > prob[idx - 1][5987][j]:
-                        if sents[j][idx] == out[idx-1][j].item():
+                    elif sents[j][idx + 1] == 2056:  # 1
+                        if prob[idx][2056][j] > prob[idx][2060][j]:
                             microf1 += 1
+
+            if args.finetune == "mrpc":
+                # 2745,11346,5599 -> 2064: equivalent 72 + 8864: inequivalent
+                out = np.argmax(prob.cpu(), axis=1)
+                for j in range(len(sents)):
+                    idx = find_label_idx(sents[j], [2745, 11346, 5599]) + 2
+                    if sents[j][idx + 1] == 72:   # 0
+                        if prob[idx][2064][j] < prob[idx][72][j]:
+                        # if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
+                            microf1 += 1
+                        else:
+                            infer += 1
+                    elif sents[j][idx + 1] == 2064:  # 1
+                        label += 1
+                        if prob[idx][2064][j] > prob[idx][72][j]:
+                        # if sents[j][idx] == out[idx-1][j].item():
+                            pre += 1
+                            infer += 1
+                            microf1 += 1
+            
+            if args.finetune == "rte":
+                # 2745,11346,5599 -> 221: 1 60: 0
+                out = np.argmax(prob.cpu(), axis=1)
+                for j in range(len(sents)):
+                    idx = find_label_idx(sents[j], [2745, 11346, 5599]) + 2
+                    if sents[j][idx + 1] == 60:   # 0
+                        if prob[idx][221][j] < prob[idx][60][j]:
+                            microf1 += 1
+                    elif sents[j][idx + 1] == 221:  # 1
+                        if prob[idx][221][j] > prob[idx][60][j]:
+                            microf1 += 1
+
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
@@ -203,8 +238,15 @@ def eval(data, startofword, model, length, args = None):
     if args.finetune is None:
         logger.info(f"eval ppl {ppl:.4f}")
         return ppl, uas
-    elif args.finetune == "sst2":
+    elif args.finetune == "sst2" or args.finetune == "rte":
         microf1 = microf1 / num_sents
+        logger.info(f"eval f1 {microf1:.4f}")
+        return -microf1, uas
+    elif args.finetune == "mrpc":
+        precision = pre / infer
+        recall = pre / label
+        logger.info(f"acc {microf1 / num_sents:.4f}")
+        microf1 = 2 * (precision*recall)/(precision+recall) if precision != 0 and recall != 0 else 0
         logger.info(f"eval f1 {microf1:.4f}")
         return -microf1, uas
 
@@ -318,7 +360,7 @@ def main(args):
     
     checkpoint_step = 0
     for epoch in range(args.num_epochs):
-        logger.info(f"epoch {epoch}")
+        logger.info(f"epoch {epoch + 1}")
         num_words = 0
         num_sents = 0
         train_loss = 0.0
@@ -336,7 +378,7 @@ def main(args):
             model : TransformerGrammar
             # print(startofword_train[i])
             ret, _ = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
-                        args.max_relative_length, args.min_relative_length)
+                        args.max_relative_length, args.min_relative_length, finetune=args.finetune)
             
             if args.return_h:
                 raw_loss, hidden = ret
@@ -367,8 +409,8 @@ def main(args):
                 if train_step < decay_steps:
                     scheduler.step()
                 else:
-                    for i in range(len(optimizer.param_groups)):
-                        optimizer.param_groups[i]['lr'] = args.stable_lr
+                    for j in range(len(optimizer.param_groups)):
+                        optimizer.param_groups[j]['lr'] = args.stable_lr
             # print(f"backward time {tmp_time3 - tmp_time2:.2f} s")
             num_words += total_length
             num_sents += batch_size
@@ -381,7 +423,7 @@ def main(args):
 
                 logger.info(f"dev data evaluation ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
             
-            if train_step % args.eval_interval == 0:
+            if train_step % args.eval_interval == 0 or i == len(train_data)-1:
                 val_ppl, val_uas = eval(dev_data, startofword_dev, model, dev_length, args=args)
 
                 if val_ppl < best_val_ppl:
@@ -390,22 +432,22 @@ def main(args):
                     best_val_uas = val_uas
                     logger.info(f"new best ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
                     checkpoint = {'args': args,
-                                'model': model.cpu(),
+                                'model': model,
                                 'vocab': vocab,
                                 'optimizer': optimizer.state_dict(),
                                 'scheduler': scheduler.state_dict() if args.scheduler == 'cosine' else None,
                                 'warm_up_scheduler': warm_up_scheduler.state_dict()
                                 }
                     torch.save(checkpoint, args.save_path) 
-                    model.cuda()
+                    # model.cuda()
                     test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args)
                     logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
                 elif args.scheduler == 'decay':
                     remaining_epoch += 1
                     if remaining_epoch >= args.decay_interval:
                         remaining_epoch = 0
-                        for i in range(len(optimizer.param_groups)):
-                            optimizer.param_groups[i]['lr'] = max(optimizer.param_groups[i]['lr'] * args.decay_rate, args.min_lr)
+                        for j in range(len(optimizer.param_groups)):
+                            optimizer.param_groups[j]['lr'] = max(optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
                         logger.info(f"decay lr to {optimizer.param_groups[0]['lr']:.6f}")
     
     end_time = time.time()
