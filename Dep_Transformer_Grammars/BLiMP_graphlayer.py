@@ -133,16 +133,12 @@ if __name__ == "__main__":
     vocab_size, pad, bos, eos, startofword_id, vocab = load_vocab('../data_process/spm_parsing/BLLIP_spm.vocab')
     torch.manual_seed(123456)
     np.random.seed(123456)
-    # ranges = TokenTypeRanges(bos, pad_id, vocab_size, left_arc, right_arc)
-    # vocab_meta = VocabMeta([left_arc, right_arc + 1])
     original = []
     subtoken_begins = []
     original_length = []
     original_seq_length = []
 
-    model_path = "models/graphlayer_small_psd_4_1:0.1_mixing_ACE_predict_ahead_catpointer_res_fix_10.pt"
-    # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead_4mix.pt"
-    # model_path = "models/graphlayer_small_psd_4_1:-1_mixing_ACE_predict_ahead.pt"
+    model_path = "models/graphlayer_small_psd_4_1:0.2_mixing_ACE_predict_ahead_graph_rel_split_5_embedknet.pt"
     beamsize = 10   # 50
     scorebeamsize = 10  # 10
     logger.info("Model path: {}".format(model_path))
@@ -150,17 +146,13 @@ if __name__ == "__main__":
     logger.info("Score beam size: {}".format(scorebeamsize))
     checkpoint = torch.load(model_path, map_location=torch.device(device))
     model = checkpoint['model']
-    left_biaffine_model = checkpoint['left_biaffine_model']
-    right_biaffine_model = checkpoint['right_biaffine_model']
+    biaffine_model = checkpoint['biaffine_model']
     model.eval()
-    left_biaffine_model.eval()
-    right_biaffine_model.eval()
+    biaffine_model.eval()
     model.to(device)
-    left_biaffine_model.to(device)
-    right_biaffine_model.to(device)
+    biaffine_model.to(device)
 
-    left_biaffine_model.set_temperature(1.0)
-    right_biaffine_model.set_temperature(1.0)
+    biaffine_model.set_temperature(1.0)
     
     sp = spm.SentencePieceProcessor(model_file='../data_process/spm_parsing/BLLIP_spm.model')
     file_list = os.listdir("/home/huangty/BLiMP_data/json/.")
@@ -267,22 +259,12 @@ if __name__ == "__main__":
                         for step in range(batch):
                             step_pre_hiddens = temp_beam[step][4]
                             step_new_hiddens = new_hiddens[step:step + 1, :, :]
-                            step_hiddens = update_concat(step_pre_hiddens, step_new_hiddens)
                             predicate = torch.concat((step_new_hiddens, model.get_emb(tokens[:, i + 1]).view(1, 1, -1)), dim=-1)
-                            arguments = argument_alignment(step_hiddens[0], sent_index_to_id[:i + 1])
-                            predicate_list.append(predicate)
-                            arguments_list.append(arguments)
-                        predicates = torch.stack(predicate_list).view(batch, 1, -1)
+                            step_hiddens = update_concat(step_pre_hiddens, predicate)
+                            predicate_list.append(step_hiddens)
+                        predicates = torch.stack(predicate_list).squeeze(1)
                         with torch.no_grad():
-                            if arguments_list == [[]]:
-                                arguments = torch.empty(1, 0, 2048).to(device)
-                                left_logits = left_biaffine_model(predicates, arguments, attn_relpos_for_pointer)
-                                right_logits = right_biaffine_model(predicates, arguments, attn_relpos_for_pointer)
-                            else:
-                                arguments = torch.stack([torch.stack(sublist) for sublist in arguments_list]).view(batch, -1, 2048).to(device)
-                                # arguments = torch.stack(arguments[0]).view(1, -1, 2048).to(device)
-                                left_logits = left_biaffine_model(predicates, arguments, attn_relpos_for_pointer).squeeze(-1)
-                                right_logits = right_biaffine_model(predicates, arguments, attn_relpos_for_pointer).squeeze(-1) # B* L*1 logits
+                            graph_scores = biaffine_model.inference(predicates, attn_relpos_for_pointer)
                     pointertime = time.time()
                     # logger.info("Pointer time: {}".format(pointertime - transformerforward))
                     
@@ -292,21 +274,21 @@ if __name__ == "__main__":
                         pre_k = temp_beam[step][2]
                         pre_v = temp_beam[step][3]
                         step_new_hiddens = new_hiddens[step:step + 1, :, :]
+                        predicate = torch.concat((step_new_hiddens, model.get_emb(tokens[:, i + 1]).view(1, 1, -1)), dim=-1)
                         step_k = new_k[step:step + 1, :, :]
                         step_v = new_v[step:step + 1, :, :]
-                        step_hiddens = update_concat(step_pre_hiddens, step_new_hiddens)
+                        step_hiddens = update_concat(step_pre_hiddens, predicate)
 
-                        # print(temp_score, prob[0, step, encoded[i+1]].item())
                         temp_score[step] += prob[0, step, encoded[i+1]].item()
-                        # print(torch.log(1 - left_logits[torch.where(left_logits<0.5)]).sum(), torch.log(left_logits[torch.where(left_logits>=0.5)]).sum())
-                        # print(torch.log(1 - right_logits[torch.where(right_logits<0.5)]).sum(), torch.log(right_logits[torch.where(right_logits>=0.5)]).sum())
                         stepbeam = BEAM(scorebeamsize) #(score, graphinfo)
                         cache_k = update_concat(pre_k, step_k)
                         cache_v = update_concat(pre_v, step_v)
                         stepbeam.update(temp_score[step], next(counter), temp_beam[step][1], cache_k, cache_v, step_hiddens)
                         
                         if start_predict_new_word[i] == 1:
-                            for j, left_score in enumerate(left_logits[step]):
+                            # newest column
+                            for j, left_score in enumerate(graph_scores[step][:-1, -1]):  # won't point itself
+                                # j -> sent_index_to_id[i+1]
                                 next_step_beam = BEAM(scorebeamsize)
                                 previous_beam = stepbeam.get_graphinfo()  #[(score, graphinfo),()]
                                 for score, graphinfo, k, v, hidden in previous_beam:
@@ -331,7 +313,9 @@ if __name__ == "__main__":
                                         next_step_beam.update(new_score, next(counter), graphinfo, k, v, hidden)
                                 stepbeam = next_step_beam
 
-                            for j, right_score in enumerate(right_logits[step]):
+                            # newest row
+                            for j, right_score in enumerate(graph_scores[step][-1, :-1]):
+                                # sent_index_to_id[i+1] -> j
                                 next_step_beam = BEAM(scorebeamsize)
                                 previous_beam = stepbeam.get_graphinfo()  #[(score, graphinfo),()]
                                 for score, graphinfo, k, v, hidden in previous_beam:

@@ -389,6 +389,40 @@ class BiaffineAttention(nn.Module):
     def set_temperature(self, value):
         self.temperature = value
 
+    def inference(self, hidden, step_attn_relpos):
+        batchsize = hidden.shape[0]
+        child_hidden = self.f_3(hidden)
+        if self.type == "Multi":
+            repeat_shape = list(hidden.shape)
+            repeat_shape[-1] = 1
+            repeat_shape[-2] = 1
+            root_tokens = self.root_representation.repeat(*repeat_shape)
+            hidden = torch.cat((root_tokens, hidden), dim=hidden.dim() - 2)
+        parent_hidden = self.f_1(hidden)
+
+        step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
+        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (1,0))
+        step_attn_relpos = F.pad(step_attn_relpos, (0,1))
+        embed_tuple_parent = [self.depth_embed[i](step_attn_relpos[i]) for i in range(len(step_attn_relpos))]
+        embed_tuple_child = [self.depth_embed[i](child_relpos[i]) for i in range(len(child_relpos))]
+        embed_biases_parent = torch.cat(embed_tuple_parent, dim=-1)
+        embed_biases_child = torch.cat(embed_tuple_child, dim=-1)
+        embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
+        embed_biases_child = self.dep_to_child_k(embed_biases_child)
+
+        position = torch.arange(-child_hidden.size(1), 1, 1.0, device=hidden.device).long()
+        position = self.pos_emb(position).permute(1, 0, 2).repeat(batchsize, 1, 1)
+        pos_info = self.pos_to_k(position)
+        parent_hidden = parent_hidden + pos_info + embed_biases_parent
+        child_hidden = child_hidden + embed_biases_child
+
+        parent_hidden = self.f_2(parent_hidden)
+        child_hidden = self.f_4(child_hidden)
+
+        scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        scores = self.softmax(scores)
+        return scores
+
 class PositionalEmbedding(nn.Module):
     def __init__(self, demb):
         super(PositionalEmbedding, self).__init__()
