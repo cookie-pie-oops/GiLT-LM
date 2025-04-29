@@ -40,27 +40,28 @@ class BeamSearchDepthBased:
         """
         Update the beam with new candidates.
         """
-        assert ids[0] == 1, "Beam search only supports batch size of 1 for now."
+        assert ids.shape[0] == 1, "Beam search only supports batch size of 1 for now."
         
         # id batch size = id[0]
         # beam batch size = [beam_size] !!!
         beam_next = [] # [beam_size]
-        step = beam_curr[0].step + 1 # we want to predict the next step
+        now_step = beam_curr[0].step + 1 # we want to predict the next step
         # ids expand to [beam_size, seqlen]
         ids = ids.repeat(self.beam_size, 1)
+        seqlen = ids.shape[1]
         with torch.no_grad():
             # get the scores for the new candidates
             # ids: [beam_size, seqlen]
             # reduced_set: [beam_size,] and every element is a set of reduced attachment decisions
-            # stack_tape: [beam_size, step, step]
+            # stack_tape: [beam_size, step, step] 
             # model: a function that takes in ids and returns scores
             
             # log prob. so we need to find MAXIMUM.
-            scores_word, scores_attach_time = model.take_step_silver_tree(ids, stack_tape, list_reduced, step)
+            scores_word, scores_attach_time = model.take_step_silver_tree(ids, stack_tape, list_reduced, now_step)
             # scores_word: [beam_size,]
             # scores_attach_time: [beam_size, step+1]
         # update the beam
-        if step != ids[0].shape[1]-1: # -> we are not at the end of the sequence
+        if now_step != seqlen-1: # -> we are not at the end of the sequence
             seen_preds = set()
             heapify(beam_next)
             for i, beam_obj in enumerate(beam_curr):
@@ -92,14 +93,14 @@ class BeamSearchDepthBased:
                                             )
                                         ],
                                         new_attachment_decisions, 
-                                        step)
+                                        now_step)
                     # add the new beam object to the heap
                     if len(beam_next) < self.beam_size:
-                        heappush(beam_next, (-new_score, new_beam_obj)) # because we want to maximize the score,
+                        heappush(beam_next, (-candidate_score, new_beam_obj)) # because we want to maximize the score,
                         # we need to push the negative score to mimic a max heap with a min heap
                     else:
-                        heappushpop(beam_next, (-new_score, new_beam_obj))
-        elif step == ids[0].shape[1]-1: # -> we are at the end of the sequence
+                        heappushpop(beam_next, (-candidate_score, new_beam_obj))
+        elif now_step == seqlen-1: # -> we are at the end of the sequence
             # with logprob = 0, i.e. prob = 1, we predict eos (or pad)
             for i, beam_obj in enumerate(beam_curr):
                 eos_attach_score = scores_attach_time[i][0].item()
@@ -113,7 +114,7 @@ class BeamSearchDepthBased:
                                             )
                                         ],
                                         new_attachment_decisions,
-                                        step)
+                                        now_step)
                 if len(beam_next) < self.beam_size:
                     heappush(beam_next, (-new_score, new_beam_obj))
                 else:
@@ -133,7 +134,8 @@ class BeamSearchDepthBased:
         )
 
     def _no_reduce_op(self, stack_pred, step_prime):
-        return stack_pred == step_prime # +1 is deleted because step_prime starts from 1.
+        # +1 is deleted because step_prime starts from 1.
+        return stack_pred == step_prime 
     
     def _update_reduced_states(self, reduced_state, stack_pred, step_prime):
         ### if stack_pred != step_prime = last_step + 1, then everything from stack_pred to step is reduced
