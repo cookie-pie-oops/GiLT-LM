@@ -88,12 +88,13 @@ def eval_marginal(model_args: ModelConfig,
 
     # ---------- 3. Beam Search ----------
     with torch.no_grad():
-        beam_searcher = BeamSearchDepthBased(beam_size=beam_size)
-
         total_log_p_hat = 0.0     # 累加 log Σ_beam p(x,y)
         total_tokens   = 0
         pbar = tqdm(total=len(dl), desc="Testing")
         for one_sample_batch in dl:
+            gold_attach = one_sample_batch["attachment_labels"] # [1, seq_len]
+            beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=gold_attach)
+            
             # ids: [1, seq_len]
             ids = one_sample_batch["ids"].to(device)
             # prep: add bos_id
@@ -101,21 +102,66 @@ def eval_marginal(model_args: ModelConfig,
                 torch.full((1,1), model_args.bos_id, device=device),
                 ids,
             ], dim=1) # [1, seq_len+1]
-
-            _, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
-
+            
+            # breakpoint()
+            beams, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
+            candidate_scores = [b.score for b in beams]
+            # joint_ppls = [torch.exp(torch.tensor(-b.score / (ids.shape[1]-1))).item() for b in beams]
+            one_ppl = torch.exp(torch.tensor(-log_p_hat / (ids.shape[1]-1))).item()
+            # breakpoint()
+            logging.info(f"Candidate scores: {candidate_scores}")
             total_log_p_hat += log_p_hat.item()
             total_tokens    += ids.numel() - 1         # 不算 bos
             running_ppl = np.exp(-total_log_p_hat / total_tokens)
             torch.cuda.empty_cache()
+
+
+            # start to eval gold
+            # ---- 1.2 初始化 stack / depth / reduced 状态 ----
+            seqlen = ids.shape[1]
+            stack_tape   = torch.zeros((1, seqlen, seqlen), device=device, dtype=torch.long)
+            list_reduced = [set()]
+            stacks_hist  = [[[0]]]              # 开始时栈里只有 <bos>
+
+            gold_log_p_hat = 0.0
+            stack_one_row = torch.zeros((1, seqlen), device=device, dtype=torch.long)
+            # ---- 1.3 逐步累加 log 概率 ----
+            for step in range(1, seqlen):      # step=1 ... L
+                lp_w, lp_attach = model.take_step_silver_tree(
+                    ids,                                    # [1, L+1]
+                    stack_tape[:, :step, :step],            # [1, step, step]
+                    list_reduced,
+                    step
+                )                                          # 返回 [1] , [1, step+1]
+
+                gold_a = gold_attach[0][step-1]                     # gold attach 决策
+                # breakpoint()
+                gold_log_p_hat += lp_w.item() + lp_attach[0, gold_a].item()
+
+                # ---- 1.4 用 gold 决策推进栈、depth、reduced ----
+                # 下面这行用的是你在 beam 里已有的 _update_stacks()
+                stacks_hist, list_reduced, stack_one_row = beam_searcher._update_stacks(
+                    reduced_states=list_reduced,
+                    stacks=stacks_hist,
+                    attachment_decisions=[gold_a],
+                    step_prime=step,
+                    depths=stack_one_row,
+                )
+                # 把新 depth 行写回总的 stack_tape
+                stack_tape[:, step, :] = stack_one_row.clone()
+            gold_one_ppl = torch.exp(-torch.tensor(gold_log_p_hat / (seqlen-1))).item()
             pbar.set_postfix(
                 log_p_hat=log_p_hat.item(),
                 total_log_p_hat=total_log_p_hat,
                 total_tokens=total_tokens,
+                one_ppl=one_ppl,
                 running_ppl=running_ppl,
+                gold_log_p_hat=gold_log_p_hat,
+                gold_one_ppl=gold_one_ppl,
             )
-            del ids, log_p_hat, running_ppl
+
             pbar.update(1)
+            # del ids, log_p_hat, running_ppl, lp_sent, lp_w, lp_attach, gold_a, beams, candidate_scores, beam_searcher
         pbar.close()
         
 
@@ -123,8 +169,8 @@ def eval_marginal(model_args: ModelConfig,
     total_nll = - total_log_p_hat
     ppl = np.exp(total_nll / total_tokens)
 
-    logging.info(f"[Marginal] log_sum_p = {total_log_p_hat:.4f} , "
-                 f"tokens = {total_tokens} , PPL = {ppl:.4f}")
+    logging.info(f"[Marginal] Log Likelihood Sum = {total_log_p_hat:.4f} , "
+                 f"# of tokens = {total_tokens}, Marginal PPL = {ppl:.4f}")
 
     # ---------- 5. 保存 ----------
     out_path = f"./ckpt/{train_args.run_name}/best/test_beam{beam_size}.json"

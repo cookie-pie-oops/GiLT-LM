@@ -33,8 +33,13 @@ class BeamSearchDepthBased:
     Beam Search given the whole sequence of attachment decisions.
     P(y_i | x_{1:n})
     """
-    def __init__(self, beam_size=300):
+    def __init__(self, beam_size=300, gold_attach=None):
         self.beam_size = beam_size
+
+        if isinstance(gold_attach, torch.Tensor):
+            gold_attach = gold_attach.tolist()
+        self.gold_attach = gold_attach
+    
         
     def update_beam(self,
                     ids,
@@ -75,6 +80,7 @@ class BeamSearchDepthBased:
             scores_word, scores_attach_time = model.take_step_silver_tree(ids, stack_tape, list_reduced, now_step)
             # scores_word: [beam_size,]
             # scores_attach_time: [beam_size, step+1]
+            
         # update the beam
         if now_step != seqlen-1: # -> we are not at the end of the sequence
             seen_preds = set()
@@ -129,6 +135,13 @@ class BeamSearchDepthBased:
                     elif candidate_score > beam_next[0][0]: # if the score is better and the heap is full, we need to pop the worst one
                         popped = heappushpop(beam_next, (candidate_score, new_beam_obj))
                         logging.debug(f"Pushed: {candidate_score}, Popped: {popped[1].score}")
+                        # if pop out is gold then see the g old
+                        if self.gold_attach is not None:
+                            if self.gold_attach[0][:now_step] == popped[1].attachment_decisions:
+                                logging.info(f"Gold attachment popped with score: {popped[1].score}")
+                                logging.info(f"Pushed: {new_score}, Popped: {popped[1].score}")
+                                
+                        logging.debug(f"Pushed: {new_score}, Popped: {popped[1].score}")
         elif now_step == seqlen-1: # -> we are at the end of the sequence
             # with logprob = 0, i.e. prob = 1, we predict eos (or pad)
             for i, beam_obj in enumerate(beam_curr):
@@ -148,7 +161,6 @@ class BeamSearchDepthBased:
                     heappush(beam_next, (new_score, new_beam_obj))
                 elif new_score > beam_next[0][0]:
                     popped = heappushpop(beam_next, (new_score, new_beam_obj))
-                    logging.debug(f"Pushed: {new_score}, Popped: {popped[1].score}")
         else:
             raise ValueError("Invalid step!")
         real_beam_next = [beam_obj for _, beam_obj in beam_next]
@@ -162,17 +174,20 @@ class BeamSearchDepthBased:
             attachment_decisions=[],
             step=0
         )
-
-    def _no_reduce_op(self, stack_pred, step_prime):
+        
+    @staticmethod
+    def _no_reduce_op(stack_pred, step_prime):
         # +1 is deleted because step_prime starts from 1.
         return stack_pred == step_prime 
     
-    def _update_reduced_states(self, reduced_state, stack_pred, step_prime):
+    @staticmethod
+    def _update_reduced_states(reduced_state, stack_pred, step_prime):
         ### if stack_pred != step_prime = last_step + 1, then everything from stack_pred to step is reduced
         for elem in range(stack_pred, step_prime):
             reduced_state.add(elem)
-            
-    def _update_stacks(self, reduced_states, stacks, attachment_decisions, step_prime, depths):
+    
+    @staticmethod
+    def _update_stacks(reduced_states, stacks, attachment_decisions, step_prime, depths):
         """
         Args:
             - reduced_states: a list of sets, each set contains the indices that are reduced
@@ -190,10 +205,10 @@ class BeamSearchDepthBased:
         for idx, (stack, stack_pred) in enumerate(zip(stacks, attachment_decisions)):
             ### stack is a list of constituents, each constituent is a list of indices
             ### add [step] into stack_state
-            if self._no_reduce_op(stack_pred, step_prime):
+            if BeamSearchDepthBased._no_reduce_op(stack_pred, step_prime):
                 stack.append([step_prime])
             else:
-                self._update_reduced_states(reduced_states[idx], stack_pred, step_prime)
+                BeamSearchDepthBased._update_reduced_states(reduced_states[idx], stack_pred, step_prime)
                 curr_constituent = [step_prime]
                 while len(stack) > 1 and stack_pred not in stack[-1]:
                     top = stack.pop()
@@ -214,6 +229,7 @@ class BeamSearchDepthBased:
         
         # ids: bos, x_1, x_2, ..., x_n, eos
         # breakpoint()
+        # gold_attach  shape: [bsz, seqlen]
         assert ids.shape[0] == 1, "Beam search only supports batch size of 1 for now."
         beam_curr = [self.init_beam() for _ in range(self.beam_size)]
         # beam_curr: [beam_size]
@@ -223,7 +239,9 @@ class BeamSearchDepthBased:
         list_reduced = [set() for _ in range(self.beam_size)]
         stacks_history = [[[0]] for _ in range(self.beam_size)]
         
+        gold_not_found_step = None
         for step_prime in range(1, seqlen):
+            # breakpoint()
             # step_prime is the step we are at, i.e. the number of attachment decisions made so far
             # ids: [bsz, seqlen]
             # reduced_set: [bsz, beam_size, max_stack_depth]
@@ -236,20 +254,22 @@ class BeamSearchDepthBased:
             attach_decision_recent = [
                 b.attachment_decisions[-1] for b in beam_curr
             ]
-            # list_reduced = [
-            #     deepcopy(list_reduced[i]) for i in range(self.beam_size)
-            # ]
-
+            # at_d = [b.attachment_decisions for b in beam_curr]
+            # see if gold is in the beam
+            found = False
+            if self.gold_attach is not None:
+                for i, b in enumerate(beam_curr):
+                    if self.gold_attach[0][:step_prime] == b.attachment_decisions:
+                        # logging.info(f"Gold attachment decision FOUND in beam {i}: {b.attachment_decisions}")
+                        # we can break here because we only need to find one
+                        found = True
+                        break
+            if not found and gold_not_found_step is None:
+                gold_not_found_step = step_prime
+                logging.info(f"Gold attachment decision started to be NOT found in beam: {self.gold_attach[0][:step_prime]}, step: {gold_not_found_step}, seqlen: {seqlen}")
+            # breakpoint()
+            
             list_reduced = deepcopy(list_reduced)
-            
-            # stack_tape = np.stack([
-            #     deepcopy(stack_tape[i]) for i in range(self.beam_size)
-            # ]) # FIXME: WHY??
-            
-            
-            # stacks_history = [
-            #     deepcopy(stacks_history[i]) for i in range(self.beam_size)
-            # ]
             stacks_history = deepcopy(stacks_history)
             
             # update stacks and things
