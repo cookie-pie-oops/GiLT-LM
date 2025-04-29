@@ -10,6 +10,7 @@ import json
 import gc
 from collate import collate_fn
 
+@torch.inference_mode()
 def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
     # use the model to test
     
@@ -51,8 +52,7 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
     # data parallel?
     if parallel_args.parallel == 'dp':
         model = torch.nn.DataParallel(model)
-    else:
-        model = model.to(device)
+
     # TODO: IF NO DP THEN delete the `module` in `module.xxx`
     model.load_state_dict(torch.load(f"./ckpt/{train_args.run_name}/best/model.pt", weights_only=True))
     model.eval()
@@ -111,10 +111,12 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(f"./ckpt/{train_args.run_name}/best/test.log"),
+            logging.FileHandler(f"./ckpt/{train_args.run_name}/best/test_joint.log"),
             logging.StreamHandler()
         ]
     )
     # eval
     eval_joint(model_args, train_args, parallel_args)
     gc.collect()
+    torch.cuda.empty_cache()
+    logging.info("Done.")   

@@ -921,13 +921,13 @@ class PushdownTransformerConstituency(nn.Module):
         next_word = self.emb(tgt)
         attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2))
         logits_next_attach = attach_logits[:, -1, :].squeeze(1) # shape [B, T+1]
-        logits_next_attach = F.log_softmax(logits_next_attach, dim=-1)
+        
         # postprocess logits_next_attach
         for batch_idx, reduced_set in enumerate(list_reduced):
             for reduced_pos in reduced_set:
                 logits_next_attach[batch_idx, reduced_pos] = -float('inf')
-
-
+        logits_next_attach = F.log_softmax(logits_next_attach, dim=-1)
+        # breakpoint()
         # logprobs_next_word_tgt: the log prob of the next word (exactly that word, not a prob distribution), in a batch
         # logits_next_attach: the log probS of the next attachment (which IS a prob distribution so we want to SELECT on this), in a batch
         return logprobs_next_word_tgt, logits_next_attach

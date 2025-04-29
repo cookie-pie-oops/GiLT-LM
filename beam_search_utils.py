@@ -7,7 +7,7 @@ from typing import List, Tuple
 import torch
 from copy import deepcopy
 from model_bllip_con import PushdownTransformerConstituency
-
+import logging
 class BeamObj:
     def __init__(self, score, score_seq, attachment_decisions, step):
         self.score = score # score of the whole (partial) sequence = log p(x,y)_{1:i}
@@ -15,6 +15,12 @@ class BeamObj:
         self.attachment_decisions = attachment_decisions # list of attachment decisions at every step [a_j]_{1:i}
         self.step = step # the step of the beam object, i.e. the number of attachment decisions made so far = i
         # (actually i-1 because we start from 0)
+    
+    def __repr__(self):
+        return f"BeamObj(score={self.score}, score_seq={self.score_seq}, attachment_decisions={self.attachment_decisions}, step={self.step})"
+    
+    def __str__(self):
+        return self.__repr__()
 
 
 def logsumexp(x):
@@ -39,6 +45,11 @@ class BeamSearchDepthBased:
                     ) -> List[BeamObj]:
         """
         Update the beam with new candidates.
+        
+        Using a min-heap to keep track of the best beam_size candidates.
+        Upon a new candidate is created, compare the score with the worst candidate in the heap.
+        If the new candidate is better, replace the worst candidate with the new candidate.
+        If the new candidate is worse, discard it.
         """
         assert ids.shape[0] == 1, "Beam search only supports batch size of 1 for now."
         
@@ -47,8 +58,12 @@ class BeamSearchDepthBased:
         beam_next = [] # [beam_size]
         now_step = beam_curr[0].step + 1 # we want to predict the next step
         # ids expand to [beam_size, seqlen]
-        ids = ids.repeat(self.beam_size, 1)
+        ids = ids.expand(self.beam_size, -1)
         seqlen = ids.shape[1]
+        beam_size = self.beam_size
+        # if seqlen < self.beam_size:
+        #     # use sort for n times will be O(n^2 log n)
+        #     # use heap for n times will be O(n log n)
         with torch.no_grad():
             # get the scores for the new candidates
             # ids: [beam_size, seqlen]
@@ -63,11 +78,15 @@ class BeamSearchDepthBased:
         # update the beam
         if now_step != seqlen-1: # -> we are not at the end of the sequence
             seen_preds = set()
+            cnt = 0
             heapify(beam_next)
             for i, beam_obj in enumerate(beam_curr):
                 # get the new score
                 new_score = beam_obj.score + scores_word[i].item()
                 # get the new attachment decisions
+                if False:
+                    print("Current beam object: ", beam_obj)
+                    print("For this attach, the scores: ", scores_attach_time[i])
                 for atta_idx, atta_score in enumerate(scores_attach_time[i]):
                     if atta_score.item() == float("-inf"):
                         continue
@@ -76,13 +95,22 @@ class BeamSearchDepthBased:
                         # and we will handle this elsewhere
                         continue
                     # new_score += atta_score.item()
+                    
                     candidate_score = new_score + atta_score.item()
+                    
+                    cnt += 1
                     # get the new attachment decisions
                     new_attachment_decisions = beam_obj.attachment_decisions + [atta_idx]
                     # check if we have seen this attachment decision before
                     if tuple(new_attachment_decisions) in seen_preds:
                         continue
                     seen_preds.add(tuple(new_attachment_decisions))
+                    
+                    if False:
+                        print("Constitute a beam object with score: ", candidate_score, 
+                            "and attachment decision: ", atta_idx)
+                        print("Beam size before updating: ", len(beam_next))
+                        print("CNT: ", cnt)
                     # create a new beam object
                     new_beam_obj = BeamObj(candidate_score,
                                         beam_obj.score_seq + [
@@ -96,10 +124,11 @@ class BeamSearchDepthBased:
                                         now_step)
                     # add the new beam object to the heap
                     if len(beam_next) < self.beam_size:
-                        heappush(beam_next, (-candidate_score, new_beam_obj)) # because we want to maximize the score,
+                        heappush(beam_next, (candidate_score, new_beam_obj)) # because we want to maximize the score,
                         # we need to push the negative score to mimic a max heap with a min heap
-                    else:
-                        heappushpop(beam_next, (-candidate_score, new_beam_obj))
+                    elif candidate_score > beam_next[0][0]: # if the score is better and the heap is full, we need to pop the worst one
+                        popped = heappushpop(beam_next, (candidate_score, new_beam_obj))
+                        logging.debug(f"Pushed: {candidate_score}, Popped: {popped[1].score}")
         elif now_step == seqlen-1: # -> we are at the end of the sequence
             # with logprob = 0, i.e. prob = 1, we predict eos (or pad)
             for i, beam_obj in enumerate(beam_curr):
@@ -116,9 +145,10 @@ class BeamSearchDepthBased:
                                         new_attachment_decisions,
                                         now_step)
                 if len(beam_next) < self.beam_size:
-                    heappush(beam_next, (-new_score, new_beam_obj))
-                else:
-                    heappushpop(beam_next, (-new_score, new_beam_obj))
+                    heappush(beam_next, (new_score, new_beam_obj))
+                elif new_score > beam_next[0][0]:
+                    popped = heappushpop(beam_next, (new_score, new_beam_obj))
+                    logging.debug(f"Pushed: {new_score}, Popped: {popped[1].score}")
         else:
             raise ValueError("Invalid step!")
         real_beam_next = [beam_obj for _, beam_obj in beam_next]
@@ -181,15 +211,19 @@ class BeamSearchDepthBased:
                  model,
                  ids, # give bsz and seqlen, shape: [bsz, seqlen]
                 ):
-        assert ids[0] == 1, "Beam search only supports batch size of 1 for now."
+        
+        # ids: bos, x_1, x_2, ..., x_n, eos
+        # breakpoint()
+        assert ids.shape[0] == 1, "Beam search only supports batch size of 1 for now."
         beam_curr = [self.init_beam() for _ in range(self.beam_size)]
         # beam_curr: [beam_size]
-        stack_tape = np.zeros((self.beam_size, ids[0].shape[1], ids[0].shape[1]), dtype=np.int64)
-        stack_tape_one_row = np.zeros((self.beam_size, ids[0].shape[1]), dtype=np.int64)
+        seqlen = ids.shape[1]
+        stack_tape = torch.zeros((self.beam_size, seqlen, seqlen), dtype=torch.long)
+        stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long)
         list_reduced = [set() for _ in range(self.beam_size)]
         stacks_history = [[[0]] for _ in range(self.beam_size)]
         
-        for step_prime in range(1, ids[0].shape[1]):
+        for step_prime in range(1, seqlen):
             # step_prime is the step we are at, i.e. the number of attachment decisions made so far
             # ids: [bsz, seqlen]
             # reduced_set: [bsz, beam_size, max_stack_depth]
@@ -197,22 +231,26 @@ class BeamSearchDepthBased:
             # model: a function that takes in ids and returns scores
             # stack_tape_tmp = stack_tape[:, :step_prime, :step_prime]
             beam_curr = self.update_beam(ids, model, beam_curr, list_reduced, stack_tape[:, :step_prime, :step_prime])
-            
+
             # get attach decisions of all beams
             attach_decision_recent = [
                 b.attachment_decisions[-1] for b in beam_curr
             ]
-            list_reduced = [
-                deepcopy(list_reduced[i]) for i in range(self.beam_size)
-            ]
+            # list_reduced = [
+            #     deepcopy(list_reduced[i]) for i in range(self.beam_size)
+            # ]
+
+            list_reduced = deepcopy(list_reduced)
+            
             # stack_tape = np.stack([
             #     deepcopy(stack_tape[i]) for i in range(self.beam_size)
             # ]) # FIXME: WHY??
             
             
-            stacks_history = [
-                deepcopy(stacks_history[i]) for i in range(self.beam_size)
-            ]
+            # stacks_history = [
+            #     deepcopy(stacks_history[i]) for i in range(self.beam_size)
+            # ]
+            stacks_history = deepcopy(stacks_history)
             
             # update stacks and things
             stacks_history, list_reduced, stack_tape_one_row = self._update_stacks(
@@ -222,12 +260,13 @@ class BeamSearchDepthBased:
                 step_prime=step_prime,
                 depths=stack_tape_one_row
             )
-            stack_tape[:, step_prime, :] = stack_tape_one_row
+            stack_tape[:, step_prime, :] = stack_tape_one_row.clone()
             
         # return: beams
         # marginal log prob = logsumexp([b.score for b in beam_curr])
-        marginal_log_prob = logsumexp([b.score for b in beam_curr]) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
-
+        # marginal_log_prob = logsumexp([b.score for b in beam_curr]) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
+        marginal_log_prob = torch.logsumexp(torch.tensor([b.score for b in beam_curr]), dim=0) # input shape [beam_size]
+        # breakpoint()
         # i.e. TODO: MARGINAL PPL = exp(-1/sum(lengths)*sum(marginal log prob))
         return beam_curr, marginal_log_prob
 

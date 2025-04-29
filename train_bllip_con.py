@@ -445,7 +445,10 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
                         # del old model.pt
                         if os.path.exists(f"./ckpt/{train_args.run_name}/best/model.pt"):
                             os.remove(f"./ckpt/{train_args.run_name}/best/model.pt")
-                        torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best/model.pt")
+                        if isinstance(model, torch.nn.DataParallel):
+                            torch.save(model.module.state_dict(), f"./ckpt/{train_args.run_name}/best/model.pt")
+                        else:
+                            torch.save(model.state_dict(), f"./ckpt/{train_args.run_name}/best/model.pt")
                         # write a file about best eval loss and step (json)
                         with open(f"./ckpt/{train_args.run_name}/best/best_eval.json", "w") as f:
                             ddict = {
