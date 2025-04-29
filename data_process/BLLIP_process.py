@@ -20,7 +20,7 @@ def parse_dependency_tree(tree_str):
 def parse_whole_section(doc_path, dataset_list, field=""):
     # the sentence number is restricted for TEST and DEV
     count_num = 0
-    restrict = {"TEST":100000, "DEV":50000}
+    restrict = {"TEST":1000, "DEV":500}
 
     for files in os.listdir(doc_path):
         if field != "" and count_num >= restrict[field]:
