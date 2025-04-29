@@ -363,10 +363,11 @@ if __name__ == "__main__":
                         pre_k = temp_beam[step][2]
                         pre_v = temp_beam[step][3]
                         step_new_hiddens = new_hiddens[step:step + 1, :, :]
-                        predicate = torch.concat((step_new_hiddens, model.get_emb(tokens[:, i + 1]).view(1, 1, -1)), dim=-1)
+                        if start_predict_new_word[i] == 1:
+                            step_new_hiddens = torch.concat((step_new_hiddens, model.get_emb(tokens[:, i + 1]).view(1, 1, -1)), dim=-1)
+                            step_hiddens = update_concat(step_pre_hiddens, step_new_hiddens)
                         step_k = new_k[step:step + 1, :, :]
                         step_v = new_v[step:step + 1, :, :]
-                        step_hiddens = update_concat(step_pre_hiddens, predicate)
 
                         temp_score[step] += prob[0, step, encoded[i+1]].item()
                         stepbeam = BEAM(scorebeamsize) #(score, graphinfo)

@@ -178,11 +178,16 @@ def add_to_all(data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, le
     
     return data, startofword_copy, max_length, index_to_id
 
-def add_format(data, index_to_id):
-    # format1: 18737,145,446,5599, format2: 168,18737,145,557,5599, format3: 168,2745,11346,5599
-    format1 = [18737, 145, 446, 5599]
-    format2 = [18737, 145, 557, 5599]
-    format3 = [2745, 11346, 5599]
+def add_format(data, index_to_id, finetune):
+    # format1: 18737,145,446,5599, format2: 18737,145,557,5599, format3: 2745,11346,5599
+    if finetune == "sst2":
+        format2 = [26858, 5599]
+        format1 = [18737, 145, 5599]
+        format3 = []
+    else:
+        format1 = [18737, 145, 446, 5599]
+        format2 = [18737, 145, 557, 5599]
+        format3 = [2745, 11346, 5599]
     for i, batch in enumerate(data):
         for j, sent in enumerate(batch):
             start1 = find_label_idx(sent, format1)
@@ -492,7 +497,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     if args.finetune is None:
         return biaffine_ppl, f_1
     elif args.finetune == "sst2" or args.finetune == "rte":
-        microf1 = microf1 / num_sents
+        microf1 = finetune_microf1 / num_sents
         logger.info(f"{args.finetune} f1 {microf1:.4f}")
         return -microf1, f_1
     elif args.finetune == "mrpc":
@@ -537,9 +542,9 @@ def main(args):
     test_data, startofword_test, test_length, test_index_to_id = add_to_all(test_data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id)
 
     if args.finetune:
-        train_index_to_id = add_format(train_data, train_index_to_id)
-        dev_index_to_id = add_format(dev_data, dev_index_to_id)
-        test_index_to_id = add_format(test_data, test_index_to_id)
+        train_index_to_id = add_format(train_data, train_index_to_id, args.finetune)
+        dev_index_to_id = add_format(dev_data, dev_index_to_id, args.finetune)
+        test_index_to_id = add_format(test_data, test_index_to_id, args.finetune)
 
     # train_arrow = align_data_arrow(train_arrow, train_data, left_arc, right_arc)
     # dev_arrow = align_data_arrow(dev_arrow, dev_data, left_arc, right_arc)

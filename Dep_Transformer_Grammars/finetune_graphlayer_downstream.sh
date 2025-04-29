@@ -7,13 +7,13 @@
 # 对于parse完的，将format的sent_idx_to_id设置为-1即可
 # eval interval: sst2 50, mrpc 10, rte 20
 export fix_lr=3e-6  # sst2 1e-5, 3e-6
-export epoch=15  # sst2 5, mrpc 15, rte 5
-export dataset=MRPC
-export finetune_set=mrpc
+export epoch=5  # sst2 5, mrpc 15, rte 5
+export dataset=RTE
+export finetune_set=rte
 export eval_interval=20
 export DATASIZE=large
 export RELTYPE=mixing
-export LOSSRATIO=0.8
+export LOSSRATIO=0.8    # we won't finetune pointer
 # baseLM
 python train_graphLayer.py \
     --train_file  ../data_process/$dataset/$dataset\_TRAIN_token.txt \
@@ -24,7 +24,7 @@ python train_graphLayer.py \
     --test_arrow_file ../data_process/$dataset/$dataset\_TEST_psd_multiarrow_2.txt \
     --log_file logs/finetune_psd_graphlayer_$finetune_set.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_psd_4_1:0.8_mixing_ACE_predict_ahead_graph_rel.pt \
+    --model_file models/graphlayer_small_psd_4_1:0.2_mixing_ACE_predict_ahead_graph_rel_split_5.pt \
     --save_path models/finetune_psd_graphlayer_$finetune_set.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
@@ -62,7 +62,7 @@ python train_graphLayer.py \
     --dropoutatt 0 \
     --eval_interval $eval_interval \
     --eval_batch_size 32 \
-    --log_every 10 \
+    --log_every 1 \
     --min_lr $fix_lr \
     --decay_interval 8 \
 

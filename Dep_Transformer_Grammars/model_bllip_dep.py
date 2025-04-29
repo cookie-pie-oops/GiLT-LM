@@ -811,10 +811,10 @@ class TransformerGrammar(nn.Module):
             #     torch.nn.Embedding(151, depth_len),
             #     torch.nn.Embedding(151, distance_len),
             #     torch.nn.Embedding(151, predepth_len)])
-            self.rel_embed = nn.ModuleList([torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024)])
+            self.rel_embed = nn.ModuleList([torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256)])
             assert self.n_head * self.d_head == degree_len + distance_len + depth_len + predepth_len
         else:
             self.rel_embed = None
