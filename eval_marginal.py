@@ -9,7 +9,7 @@ from config import ModelConfig, TrainConfig, ParallelConfig
 from collate import collate_fn
 import sentencepiece as spm
 from tqdm import tqdm
-DEBUG = True
+DEBUG = False
 
 @torch.inference_mode()
 def eval_marginal(model_args: ModelConfig,

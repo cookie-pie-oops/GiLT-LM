@@ -9,7 +9,7 @@ import torch.nn as nn
 import json
 import gc
 from collate import collate_fn
-DEBUG = True
+DEBUG = False
 
 @torch.inference_mode()
 def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
