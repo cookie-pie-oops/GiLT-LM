@@ -9,6 +9,7 @@ from config import ModelConfig, TrainConfig, ParallelConfig
 from collate import collate_fn
 import sentencepiece as spm
 from tqdm import tqdm
+import random, os
 DEBUG = False
 
 @torch.inference_mode()
@@ -33,7 +34,15 @@ def eval_marginal(model_args: ModelConfig,
         num_workers=train_args.num_workers,
         collate_fn=collate_fn,
     )
-
+    random.seed(train_args.seed)
+    os.environ["PYTHONHASHSEED"] = str(train_args.seed)
+    np.random.seed(train_args.seed)
+    torch.manual_seed(train_args.seed)
+    torch.cuda.manual_seed_all(train_args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # shut down the grad
+    torch.set_grad_enabled(False)
     # ---------- 2. 模型 ----------
     sp = spm.SentencePieceProcessor()
     sp.Load("./data_process/spm_parsing/BLLIP_spm.model")
@@ -85,6 +94,9 @@ def eval_marginal(model_args: ModelConfig,
             state_dict = new_state_dict
     model.load_state_dict(state_dict, strict=True)
     model.eval()
+    # eval the parallel module
+    if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
+        model.module.eval()
 
     # ---------- 3. Beam Search ----------
     with torch.no_grad():
@@ -94,6 +106,7 @@ def eval_marginal(model_args: ModelConfig,
         for one_sample_batch in dl:
             gold_attach = one_sample_batch["attachment_labels"] # [1, seq_len]
             beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=gold_attach)
+            
             
             # ids: [1, seq_len]
             ids = one_sample_batch["ids"].to(device)
@@ -105,11 +118,14 @@ def eval_marginal(model_args: ModelConfig,
             
             # breakpoint()
             beams, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
+            if DEBUG:
+                breakpoint()
             candidate_scores = [b.score for b in beams]
             # joint_ppls = [torch.exp(torch.tensor(-b.score / (ids.shape[1]-1))).item() for b in beams]
             one_ppl = torch.exp(torch.tensor(-log_p_hat / (ids.shape[1]-1))).item()
             # breakpoint()
-            logging.info(f"Candidate scores: {candidate_scores}")
+            if DEBUG:
+                logging.info(f"Candidate scores: {candidate_scores}")
             total_log_p_hat += log_p_hat.item()
             total_tokens    += ids.numel() - 1         # 不算 bos
             running_ppl = np.exp(-total_log_p_hat / total_tokens)
@@ -172,7 +188,7 @@ def eval_marginal(model_args: ModelConfig,
     logging.info(f"[Marginal] Log Likelihood Sum = {total_log_p_hat:.4f} , "
                  f"# of tokens = {total_tokens}, Marginal PPL = {ppl:.4f}")
 
-    # ---------- 5. 保存 ----------
+    # ---------- 5. saving ----------
     out_path = f"./ckpt/{train_args.run_name}/best/test_beam{beam_size}.json"
     with open(out_path, "w") as f:
         json.dump({

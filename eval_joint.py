@@ -8,6 +8,7 @@ import logging
 import torch.nn as nn
 import json
 import gc
+import random, os
 from collate import collate_fn
 DEBUG = False
 
@@ -32,6 +33,15 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
     sp.Load("./data_process/spm_parsing/BLLIP_spm.model")
     vocab_size = sp.GetPieceSize()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    random.seed(train_args.seed)
+    os.environ["PYTHONHASHSEED"] = str(train_args.seed)
+    np.random.seed(train_args.seed)
+    torch.manual_seed(train_args.seed)
+    torch.cuda.manual_seed_all(train_args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # shut down the grad
+    torch.set_grad_enabled(False)
     # test
     logging.info("=" * 100)
     logging.info(f"Testing started")
@@ -77,6 +87,9 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
             state_dict = new_state_dict
     model.load_state_dict(state_dict, strict=True)
     model.eval()
+    # eval the parallel module
+    if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
+        model.module.eval()
     
     with torch.no_grad():
         test_losses_w = []
@@ -135,7 +148,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(f"./ckpt/{train_args.run_name}/best/test_joint.log"),
+            logging.FileHandler(f"./ckpt/{train_args.run_name}/epoch_3/test_joint.log"),
             logging.StreamHandler()
         ]
     )

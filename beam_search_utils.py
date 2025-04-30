@@ -225,6 +225,7 @@ class BeamSearchDepthBased:
     def __call__(self, 
                  model,
                  ids, # give bsz and seqlen, shape: [bsz, seqlen]
+                 return_trail=False,
                 ):
         
         # ids: bos, x_1, x_2, ..., x_n, eos
@@ -240,6 +241,8 @@ class BeamSearchDepthBased:
         stacks_history = [[[0]] for _ in range(self.beam_size)]
         
         gold_not_found_step = None
+        if return_trail:
+            prefix_marginal_score_trajectory = []
         for step_prime in range(1, seqlen):
             # breakpoint()
             # step_prime is the step we are at, i.e. the number of attachment decisions made so far
@@ -264,7 +267,7 @@ class BeamSearchDepthBased:
                         # we can break here because we only need to find one
                         found = True
                         break
-            if not found and gold_not_found_step is None:
+            if not found and gold_not_found_step is None and self.gold_attach is not None:
                 gold_not_found_step = step_prime
                 logging.info(f"Gold attachment decision started to be NOT found in beam: {self.gold_attach[0][:step_prime]}, step: {gold_not_found_step}, seqlen: {seqlen}")
             # breakpoint()
@@ -282,13 +285,23 @@ class BeamSearchDepthBased:
             )
             stack_tape[:, step_prime, :] = stack_tape_one_row.clone()
             
+            # now compute a logsumexp, i.e. marginal log prob, then put into marginal_log_prob_trajectory
+            if return_trail:
+                prefix_marginal_score_trajectory.append(
+                    torch.logsumexp(torch.tensor([b.score for b in beam_curr]), dim=0)
+                )
+            
         # return: beams
         # marginal log prob = logsumexp([b.score for b in beam_curr])
         # marginal_log_prob = logsumexp([b.score for b in beam_curr]) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
         marginal_log_prob = torch.logsumexp(torch.tensor([b.score for b in beam_curr]), dim=0) # input shape [beam_size]
         # breakpoint()
         # i.e. TODO: MARGINAL PPL = exp(-1/sum(lengths)*sum(marginal log prob))
-        return beam_curr, marginal_log_prob
+        
+        if return_trail:
+            return beam_curr, marginal_log_prob, prefix_marginal_score_trajectory
+        else:
+            return beam_curr, marginal_log_prob
 
         
         
