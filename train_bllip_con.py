@@ -36,10 +36,7 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
     dev_dataset = HFDataset.load_from_disk(
         "./data/BLLIP_LG_dev"
     )
-    # test_dataset = HFDataset.load_from_disk(
-    #     "./data/BLLIP_LG_test"
-    # )
-    
+
     # 1. load model
     # 1.1 set seed
     random.seed(train_args.seed)

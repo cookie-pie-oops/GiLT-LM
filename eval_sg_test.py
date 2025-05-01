@@ -59,32 +59,6 @@ class TestSuiteParser:
     def get_example(self, idx):
         return self.meta_data["data"][idx]
 
-    # def evaluate_example(self, idx, evaluator, verbose=False):
-    #     examples = self.get_example(idx)
-    #     phen2surprisals = {} # phen means phenomenon
-    #     for phen in examples:
-    #         DEBUG = True
-    #         if DEBUG:
-    #             # generate a random example
-    #             phen2surprisals[phen] = [0, 1, 2, 3, 4]
-    #             breakpoint()
-    #         else:
-    #             target_surprisals, logprobs, target_idxs, _ = evaluator.get_surprisals(
-    #                 examples[phen]
-    #             )
-    #             if verbose:
-    #                 print("Regions: {}".format(examples[phen]))
-    #                 print(logprobs)
-    #             phen2surprisals[phen] = [0] + target_surprisals
-
-    #     extracted_formula = self.extract_formulas(phen2surprisals)
-    #     self.answers[idx] = extracted_formula
-
-    # def evaluate_all(self, evaluator=None):
-    #     for idx in tqdm(range(len(self.meta_data["data"]))):
-    #         self.evaluate_example(idx, evaluator)
-    #     return
-
 def load_vocab(path):
     vocab_file = path
 
@@ -188,6 +162,7 @@ def eval_sg(model_args: ModelConfig,
     file_list = os.listdir("test_suites/json/.")
     final_acc = []
     final_acc_per_type = {}
+    logging.info("# of tests: {}".format(len(file_list)))
     for file in file_list:
         test_suite_parser = TestSuiteParser(file[:-5])
         logging.info("-" * 100)
@@ -196,20 +171,19 @@ def eval_sg(model_args: ModelConfig,
         acc = 0.0
         logging.info(f"Suite type: {suite_type}")
         # ---------- 3. Beam Search ----------
-        for sample_idx in tqdm(range(len(test_suite_parser.meta_data["data"])), desc=f"Evaluating {file}", disable=True):
+        for sample_idx in tqdm(range(len(test_suite_parser.meta_data["data"])), desc=f"Evaluating {file}", disable=DEBUG):
             examples = test_suite_parser.get_example(sample_idx)
             phen2surprisals = {}
             beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=None)
             for phen in examples:
-                # print(phen)
-                # breakpoint()
                 sent_list = examples[phen] + ["."]
                 ids_ori = sp.Encode(sent_list, out_type=int) # `encoded` in reference script
                 
                 
                 ids_ori.insert(0, [model_args.bos_id])
                 ids_ori.append([model_args.eos_id])
-                # 计算每个词在扁平化token序列中的起始和结束索引
+                # ids_ori: [[1], [76], [7268], [74], [63], [5865], [60, 8063], [7400, 73], [60, 61], [2]]
+                # Compute the start and end indices of each word in the flattened token sequence
                 tgt_idx = []
                 word_idx = -1
                 prev_idx = -1
@@ -231,6 +205,9 @@ def eval_sg(model_args: ModelConfig,
                 # seqlen = ids.shape[1] - 1
                 is_start_of_word = torch.BoolTensor(is_start_of_word).unsqueeze(0).to(device) # shape [1, L+1]
                 # search for the whole seq, beam_size
+                
+                
+                # --- NOTE: Things below can be freely adapted to other beam search implementations ---
                 _, _, prefix_trajectories = beam_searcher(model, ids, return_trail=True) # where -1*score = surprisal
                 prefix_trajectories = (-torch.tensor(prefix_trajectories)).tolist() # -> prefix list of surprisals
                 
@@ -238,6 +215,8 @@ def eval_sg(model_args: ModelConfig,
                     prefix_trajectories[tgt_idx[i][1]] - prefix_trajectories[tgt_idx[i][0]]
                     for i in range(len(tgt_idx))
                 ] # -log p(xt | x<xt)
+               
+                # --- Things above can be freely adapted to other beam search implementations ---
                 phen2surprisals[phen] = [0] + target_surprisals
             
             extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
@@ -246,7 +225,8 @@ def eval_sg(model_args: ModelConfig,
             if not math.isnan(answer):
                 acc += answer
                 if DEBUG:
-                    logging.info(f"Example {sample_idx}: {examples} -> [{extracted_formula}] == {answer}")
+                    logging.info(f"Example {sample_idx}/{len(test_suite_parser.meta_data["data"])}: {examples} -> [{extracted_formula}] == {answer}")
+                    logging.info(f"True/All: {acc}/{sample_idx + 1}")
             else:
                 logging.error(f"Invalid formula: {extracted_formula}")
                 raise ValueError(f"Invalid formula: {extracted_formula}")

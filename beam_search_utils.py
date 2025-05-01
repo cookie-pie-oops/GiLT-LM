@@ -22,6 +22,11 @@ class BeamObj:
     def __str__(self):
         return self.__repr__()
 
+    def __lt__(self, other):
+        return self.score < other.score
+    
+    def __eq__(self, other):
+        return self.score == other.score
 
 def logsumexp(x):
     x = np.array(x)
