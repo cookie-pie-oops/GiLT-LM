@@ -122,7 +122,8 @@ def eval_marginal(model_args: ModelConfig,
                 breakpoint()
             candidate_scores = [b.score for b in beams]
             # joint_ppls = [torch.exp(torch.tensor(-b.score / (ids.shape[1]-1))).item() for b in beams]
-            one_ppl = torch.exp(torch.tensor(-log_p_hat / (ids.shape[1]-1))).item()
+            # one_ppl = torch.exp(torch.tensor(-log_p_hat / (ids.shape[1]-1))).item()
+            one_ppl = np.exp(-log_p_hat.item() / (ids.shape[1]-1))
             # breakpoint()
             if DEBUG:
                 logging.info(f"Candidate scores: {candidate_scores}")
@@ -134,46 +135,46 @@ def eval_marginal(model_args: ModelConfig,
 
             # start to eval gold
             # ---- 1.2 初始化 stack / depth / reduced 状态 ----
-            seqlen = ids.shape[1]
-            stack_tape   = torch.zeros((1, seqlen, seqlen), device=device, dtype=torch.long)
-            list_reduced = [set()]
-            stacks_hist  = [[[0]]]              # 开始时栈里只有 <bos>
+            # seqlen = ids.shape[1]
+            # stack_tape   = torch.zeros((1, seqlen, seqlen), device=device, dtype=torch.long)
+            # list_reduced = [set()]
+            # stacks_hist  = [[[0]]]              # 开始时栈里只有 <bos>
 
-            gold_log_p_hat = 0.0
-            stack_one_row = torch.zeros((1, seqlen), device=device, dtype=torch.long)
-            # ---- 1.3 逐步累加 log 概率 ----
-            for step in range(1, seqlen):      # step=1 ... L
-                lp_w, lp_attach = model.take_step_silver_tree(
-                    ids,                                    # [1, L+1]
-                    stack_tape[:, :step, :step],            # [1, step, step]
-                    list_reduced,
-                    step
-                )                                          # 返回 [1] , [1, step+1]
+            # gold_log_p_hat = 0.0
+            # stack_one_row = torch.zeros((1, seqlen), device=device, dtype=torch.long)
+            # # ---- 1.3 逐步累加 log 概率 ----
+            # for step in range(1, seqlen):      # step=1 ... L
+            #     lp_w, lp_attach = model.take_step_silver_tree(
+            #         ids,                                    # [1, L+1]
+            #         stack_tape[:, :step, :step],            # [1, step, step]
+            #         list_reduced,
+            #         step
+            #     )                                          # 返回 [1] , [1, step+1]
 
-                gold_a = gold_attach[0][step-1]                     # gold attach 决策
-                # breakpoint()
-                gold_log_p_hat += lp_w.item() + lp_attach[0, gold_a].item()
+            #     gold_a = gold_attach[0][step-1]                     # gold attach 决策
+            #     # breakpoint()
+            #     gold_log_p_hat += lp_w.item() + lp_attach[0, gold_a].item()
 
-                # ---- 1.4 用 gold 决策推进栈、depth、reduced ----
-                # 下面这行用的是你在 beam 里已有的 _update_stacks()
-                stacks_hist, list_reduced, stack_one_row = beam_searcher._update_stacks(
-                    reduced_states=list_reduced,
-                    stacks=stacks_hist,
-                    attachment_decisions=[gold_a],
-                    step_prime=step,
-                    depths=stack_one_row,
-                )
-                # 把新 depth 行写回总的 stack_tape
-                stack_tape[:, step, :] = stack_one_row.clone()
-            gold_one_ppl = torch.exp(-torch.tensor(gold_log_p_hat / (seqlen-1))).item()
+            #     # ---- 1.4 用 gold 决策推进栈、depth、reduced ----
+            #     # 下面这行用的是你在 beam 里已有的 _update_stacks()
+            #     stacks_hist, list_reduced, stack_one_row = beam_searcher._update_stacks(
+            #         reduced_states=list_reduced,
+            #         stacks=stacks_hist,
+            #         attachment_decisions=[gold_a],
+            #         step_prime=step,
+            #         depths=stack_one_row,
+            #     )
+            #     # 把新 depth 行写回总的 stack_tape
+            #     stack_tape[:, step, :] = stack_one_row.clone()
+            # gold_one_ppl = torch.exp(-torch.tensor(gold_log_p_hat / (seqlen-1))).item()
             pbar.set_postfix(
                 log_p_hat=log_p_hat.item(),
                 total_log_p_hat=total_log_p_hat,
                 total_tokens=total_tokens,
                 one_ppl=one_ppl,
                 running_ppl=running_ppl,
-                gold_log_p_hat=gold_log_p_hat,
-                gold_one_ppl=gold_one_ppl,
+                # gold_log_p_hat=gold_log_p_hat,
+                # gold_one_ppl=gold_one_ppl,
             )
 
             pbar.update(1)

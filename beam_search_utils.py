@@ -143,8 +143,8 @@ class BeamSearchDepthBased:
                         # if pop out is gold then see the g old
                         if self.gold_attach is not None:
                             if self.gold_attach[0][:now_step] == popped[1].attachment_decisions:
-                                logging.info(f"Gold attachment popped with score: {popped[1].score}")
-                                logging.info(f"Pushed: {new_score}, Popped: {popped[1].score}")
+                                logging.debug(f"Gold attachment popped with score: {popped[1].score}")
+                                logging.debug(f"Pushed: {new_score}, Popped: {popped[1].score}")
                                 
                         logging.debug(f"Pushed: {new_score}, Popped: {popped[1].score}")
         elif now_step == seqlen-1: # -> we are at the end of the sequence
@@ -240,8 +240,8 @@ class BeamSearchDepthBased:
         beam_curr = [self.init_beam() for _ in range(self.beam_size)]
         # beam_curr: [beam_size]
         seqlen = ids.shape[1]
-        stack_tape = torch.zeros((self.beam_size, seqlen, seqlen), dtype=torch.long)
-        stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long)
+        stack_tape = torch.zeros((self.beam_size, seqlen, seqlen), dtype=torch.long, device=ids.device)
+        stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long, device=ids.device)
         list_reduced = [set() for _ in range(self.beam_size)]
         stacks_history = [[[0]] for _ in range(self.beam_size)]
         
@@ -274,7 +274,7 @@ class BeamSearchDepthBased:
                         break
             if not found and gold_not_found_step is None and self.gold_attach is not None:
                 gold_not_found_step = step_prime
-                logging.info(f"Gold attachment decision started to be NOT found in beam: {self.gold_attach[0][:step_prime]}, step: {gold_not_found_step}, seqlen: {seqlen}")
+                logging.debug(f"Gold attachment decision started to be NOT found in beam: {self.gold_attach[0][:step_prime]}, step: {gold_not_found_step}, seqlen: {seqlen}")
             # breakpoint()
             
             list_reduced = deepcopy(list_reduced)

@@ -12,7 +12,7 @@ from beam_search_utils import BeamSearchDepthBased
 import random
 import gc
 from utils import get_suite_type, eval_math_expr
-DEBUG = True
+DEBUG = False
 
 class TestSuiteParser:
     def __init__(self, test_suite_file):
@@ -117,7 +117,8 @@ def eval_sg(model_args: ModelConfig,
     ).to(device)
     
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
+        # model = torch.nn.DataParallel(model)
+        logging.warning("This script does not support DataParallel.")
 
     ckpt = f"./ckpt/{train_args.run_name}/best/model.pt"
     state_dict = torch.load(ckpt, map_location=device, weights_only=True)
@@ -210,7 +211,8 @@ def eval_sg(model_args: ModelConfig,
                 # --- NOTE: Things below can be freely adapted to other beam search implementations ---
                 _, _, prefix_trajectories = beam_searcher(model, ids, return_trail=True) # where -1*score = surprisal
                 prefix_trajectories = (-torch.tensor(prefix_trajectories)).tolist() # -> prefix list of surprisals
-                
+                prefix_trajectories = [0] + prefix_trajectories # add the first one
+                # prefix_trajectories: [0=-log p(x0), -log p(x1|x0), -log p(x2|x0,x1), ...]
                 target_surprisals = [
                     prefix_trajectories[tgt_idx[i][1]] - prefix_trajectories[tgt_idx[i][0]]
                     for i in range(len(tgt_idx))
@@ -218,6 +220,7 @@ def eval_sg(model_args: ModelConfig,
                
                 # --- Things above can be freely adapted to other beam search implementations ---
                 phen2surprisals[phen] = [0] + target_surprisals
+                # breakpoint()
             
             extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
             test_suite_parser.answers[sample_idx] = extracted_formula
