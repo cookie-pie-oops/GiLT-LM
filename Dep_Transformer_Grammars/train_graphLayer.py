@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import torch.nn as nn
+import torch.nn.functional as F
 import logging
 import time
 import json
@@ -589,9 +590,9 @@ def main(args):
     else:
         logger.info(f"loading model from {args.model_file}")
         if torch.cuda.is_available():
-            checkpoint = torch.load(args.model_file)
+            checkpoint = torch.load(args.model_file, weights_only=False)
         else:
-            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'))
+            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'), weights_only=False)
         if 'biaffine_model' in checkpoint:
             biaffine_model = checkpoint['biaffine_model']
             # right_biaffine_model = checkpoint['right_biaffine_model']
@@ -790,35 +791,41 @@ def main(args):
 
                 biaffine_loss = []
                 if [sents_left_arrow, sents_right_arrow]:
+                    padding_size = max([max(i) for i in sents_index_to_id])
+                    batched_predicate = []
+                    batched_label = []
+                    batched_mask = []
+                    batched_attn_rel = []
                     for sent_ids, sent_index_to_id, predicates_input, sent_left_label, sent_right_label, attn_rel in zip(
                         sents, sents_index_to_id, batch_predicates_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
-                        # input1 = []
                         max_word_length = max(sent_index_to_id)
-                        # words_piece_input = torch.stack(arguments_input)
-                        # input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
-                        labels = torch.zeros(max_word_length + 1, max_word_length + 1).to(device)
+                        mask = torch.ones(max_word_length + 1, max_word_length + 1)
+                        mask = F.pad(mask, (0, padding_size - max_word_length, 0, padding_size - max_word_length))
+                        attn_rel = F.pad(attn_rel, (0, padding_size - max_word_length, 0, padding_size - max_word_length))
+                        labels = torch.zeros(padding_size + 1, padding_size + 1)
                         for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
                             labels[idx + 1, right_label] = positivelabel
                             labels[left_label, idx + 1] = positivelabel
-                        # for j in range(len(sent_ids)):
-                        #     if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
-                        #         words_index = sent_index_to_id[j] - 1
-                        #         # predicate_input = predicates_input[words_index]
-                        #         # input1.append(predicate_input.view(1, -1))
-
-                        #         if sent_left_label[words_index]:
-                        #             left_labels[words_index][sent_left_label[words_index]] = positivelabel 
-                        #         if sent_right_label[words_index]:
-                        #             right_labels[words_index][sent_right_label[words_index]] = positivelabel
 
                         if predicates_input:
-                            # input1 = torch.stack(input1)
+                            batched_label.append(labels[:, 1:])
+                            batched_mask.append(mask[:, 1:])
+                            batched_attn_rel.append(attn_rel)
+                            batched_predicate.append(F.pad(torch.stack(predicates_input), (0, 0, 0, padding_size - max_word_length)))
                             # mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:]
-                            # mask = mask.to(device)
-                            labels = (labels[:,1:]).unsqueeze(0)
-                            scores = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
-                            loss = crit(scores, labels).sum()
-                            biaffine_loss.append(loss)
+                            # labels = (labels[:,1:]).unsqueeze(0)
+                            # scores = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
+                            # loss = crit(scores, labels).sum()
+                            # biaffine_loss.append(loss)
+                    
+                    batched_predicate = torch.stack(batched_predicate).to(device)
+                    batched_label = torch.stack(batched_label).to(device)
+                    batched_mask = torch.stack(batched_mask).to(device)
+                    batched_attn_rel = torch.stack(batched_attn_rel).to(device)
+                    batched_attn_rel = batched_attn_rel.permute(1, 0, 2, 3)
+                    scores = biaffine_model(batched_predicate, batched_attn_rel)
+                    loss = crit(scores, batched_label) * batched_mask
+                    biaffine_loss.append(loss.sum(dim = (-1, -2)))
 
             biaffine_end = time.time()
             # logger.info(f"Biaffine forwarding takes {biaffine_end-biaffine_start:.2f} seconds")

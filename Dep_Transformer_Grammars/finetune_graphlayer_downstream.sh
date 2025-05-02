@@ -4,7 +4,6 @@
 #SBATCH -G 1
 #SBATCH --output=finetune_psd_MRPC.out
 
-# 对于parse完的，将format的sent_idx_to_id设置为-1即可
 # eval interval: sst2 50, mrpc 10, rte 20
 export fix_lr=3e-6  # sst2 1e-5, 3e-6
 export epoch=5  # sst2 5, mrpc 15, rte 5

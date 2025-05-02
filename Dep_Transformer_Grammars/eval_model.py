@@ -562,9 +562,9 @@ def main(args):
     else:
         logger.info(f"loading model from {args.model_file}")
         if torch.cuda.is_available():
-            checkpoint = torch.load(args.model_file)
+            checkpoint = torch.load(args.model_file, weights_only=False)
         else:
-            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'))
+            checkpoint = torch.load(args.model_file, map_location=torch.device('cpu'), weights_only=False)
         model = checkpoint['model']
         biaffine_model = checkpoint['biaffine_model']
         # right_biaffine_model = checkpoint['right_biaffine_model']

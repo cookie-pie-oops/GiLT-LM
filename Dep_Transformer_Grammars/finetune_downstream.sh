@@ -2,30 +2,33 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH -G 1
-#SBATCH --output=finetune_txl_MRPC.out
+#SBATCH --output=finetune_txl_STS_1.out
 
-# 对于parse完的，将format的sent_idx_to_id设置为-1即可
 # eval interval: sst2 50, mrpc 10, rte 20
-export fix_lr=3e-6  # sst2 1e-5, 3e-6
-export epoch=30  # sst2 5, mrpc 15, rte 5
-export dataset=MRPC
-export finetune_set=mrpc
+export fix_lr=1e-5  # sst2 1e-5, 3e-6
+export epoch=45  # sst2 5, mrpc 15, rte 5
+export dataset=STS
+export finetune_set=sts
 export eval_interval=10
+export random_seed=1234   # 1234, 12345, 123456
 # baseLM
 python train_dep.py \
     --train_file  ../data_process/$dataset/$dataset\_TRAIN_token.txt \
     --dev_file ../data_process/$dataset/$dataset\_DEV_token.txt \
     --test_file ../data_process/$dataset/$dataset\_TEST_token.txt \
-    --log_file logs/finetune_txl_$finetune_set.txt \
+    --log_file logs/finetune_txl_$finetune_set\_$random_seed.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
     --model_file models/large_tok_txl_seed_4.pt \
-    --save_path models/finetune_txl_$finetune_set.pt \
+    --save_path models/finetune_txl_$finetune_set\_$random_seed.pt \
+    --sts_train_path ../data_process/STS/STS_TRAIN_score.txt \
+    --sts_dev_path ../data_process/STS/STS_DEV_score.txt \
+    --sts_test_path ../data_process/STS/STS_TEST_score.txt \
     --finetune $finetune_set \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
     --attn_mask None \
     --gpu 0 \
-    --batch_size 128 \
+    --batch_size 256 \
     --w_dim 1024 \
     --n_head 8 \
     --d_head 128 \
@@ -33,7 +36,7 @@ python train_dep.py \
     --num_layers 16 \
     --max_relative_length 62 \
     --min_relative_length -1 \
-    --seed 12345 \
+    --seed $random_seed \
     --weight_decay 0 \
     --max_grad_norm 3.0 \
     --num_epochs $epoch \

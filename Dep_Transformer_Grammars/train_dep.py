@@ -7,6 +7,7 @@ import torch.nn as nn
 import logging
 import time
 import json
+from scipy.stats import pearsonr, spearmanr
 from torch import cuda
 from helping_utils.logger import configure_logger, get_logger
 from model_bllip_dep import TransformerGrammar, find_label_idx
@@ -65,6 +66,14 @@ parser.add_argument('--dropouto', default=0.5, type=float)
 parser.add_argument('--alpha', default=0.2, type=float)
 parser.add_argument('--beta', default=0.1, type=float)
 parser.add_argument('--finetune', default=None, type=str)
+parser.add_argument('--sts_train_path', default=None)
+parser.add_argument('--sts_dev_path', default=None)
+parser.add_argument('--sts_test_path', default=None)
+
+if torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
 
 def log_arguments(args):
 
@@ -73,7 +82,7 @@ def log_arguments(args):
     for key, value in hp_dict.items():
         logger.info(f"{key}\t{value}")
 
-def load_data(path, batchsize=-1, shuffle=False):
+def load_data(path, batchsize=-1, shuffle=False, seed=1111):
     
     with open(path, 'r') as f:
         sents = [line.strip() for line in f.readlines()]
@@ -83,12 +92,26 @@ def load_data(path, batchsize=-1, shuffle=False):
         sents = [[int(word) for word in sent] for sent in sents]
     
     if shuffle:
+        np.random.seed(seed)
         np.random.shuffle(sents)
     
     if batchsize == -1:
         return [sents]
     else:
         return [sents[i:i+batchsize] for i in range(0, len(sents), batchsize)]
+
+def load_STS_score(path, batchsize=-1, shuffle=False, seed=1111):
+    with open(path, 'r') as f:
+        scores = [float(line.strip()) for line in f.readlines()]
+        
+    if shuffle:
+        np.random.seed(seed)
+        np.random.shuffle(scores)
+    
+    if batchsize == -1:
+        return [scores]
+    else:
+        return [scores[i:i+batchsize] for i in range(0, len(scores), batchsize)]
 
 def add_to_all(data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, startofword_id, pop_root):
     
@@ -166,7 +189,7 @@ def weights_init(m):
             fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
             nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
 
-def eval(data, startofword, model, length, args = None):
+def eval(data, startofword, model, length, args = None, score = None):
     model.eval()
     num_sents = 0
     total_loss = 0.0
@@ -176,6 +199,8 @@ def eval(data, startofword, model, length, args = None):
     pre = 0
     infer = 0
     label = 0
+    prediction = []
+    score_label = []
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -184,7 +209,7 @@ def eval(data, startofword, model, length, args = None):
             mems = tuple()
             
             ret, prob = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, False, 
-                        args.max_relative_length, args.min_relative_length)
+                        args.max_relative_length, args.min_relative_length, finetune=args.finetune)
             if args.finetune == "sst2":
                 # 26858,5599 -> 2056: positive 2060: negative
                 out = np.argmax(prob.cpu(), axis=1)
@@ -228,27 +253,39 @@ def eval(data, startofword, model, length, args = None):
                         if prob[idx][221][j] > prob[idx][60][j]:
                             microf1 += 1
 
+            if args.finetune == "sts":
+                prediction.extend(ret.cpu().tolist())
+                score_label.extend(score[i])
+
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
 
-    ppl = np.exp(total_loss / num_words) 
     logger = get_logger()
     model.train()
     if args.finetune is None:
-        logger.info(f"eval ppl {ppl:.4f}")
+        ppl = np.exp(total_loss / num_words) 
+        logger.info(f"---eval ppl {ppl:.4f}")
         return ppl, uas
     elif args.finetune == "sst2" or args.finetune == "rte":
         microf1 = microf1 / num_sents
-        logger.info(f"eval f1 {microf1:.4f}")
+        logger.info(f"---eval f1 {microf1:.4f}")
         return -microf1, uas
     elif args.finetune == "mrpc":
         precision = pre / infer
         recall = pre / label
-        logger.info(f"acc {microf1 / num_sents:.4f}")
+        logger.info(f"---acc {microf1 / num_sents:.4f}")
         microf1 = 2 * (precision*recall)/(precision+recall) if precision != 0 and recall != 0 else 0
-        logger.info(f"eval f1 {microf1:.4f}")
+        logger.info(f"---eval f1 {microf1:.4f}")
         return -microf1, uas
+    elif args.finetune == "sts":
+        prediction = np.array(prediction).reshape(-1)
+        score_label = np.array(score_label).reshape(-1)
+        r, _ = pearsonr(prediction, score_label)
+        spr, _ = spearmanr(prediction, score_label)
+        logger.info(f"---pearson correlation coefficient:{r:.4f}")
+        logger.info(f"---spearman rank correlation coefficient:{spr:.4f}")
+        return -(r+spr), uas
 
 def main(args):
     np.random.seed(args.seed)
@@ -260,9 +297,13 @@ def main(args):
     batch_size = args.batch_size
     eval_batch_size = args.eval_batch_size
 
-    train_data = load_data(train_path, batchsize=batch_size, shuffle=True)
-    dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=True)
-    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=True)
+    train_data = load_data(train_path, batchsize=batch_size, shuffle=True, seed=args.seed)
+    dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+    if args.finetune == "sts":
+        train_sts_score = load_STS_score(args.sts_train_path, batchsize=batch_size, shuffle=True, seed=args.seed)
+        dev_sts_score = load_STS_score(args.sts_dev_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+        test_sts_score = load_STS_score(args.sts_test_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
     vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, pop_root, startofword_id, vocab = load_vocab(args.vocab_file)
     
     # print(left_arc)
@@ -306,9 +347,8 @@ def main(args):
         nn.init.uniform_(model.emb.weight, -np.sqrt(3 / fan_in), np.sqrt(3 / fan_in))
     else:
         logger.info(f"loading model from {args.model_file}")
-        checkpoint = torch.load(args.model_file)
+        checkpoint = torch.load(args.model_file, map_location=torch.device(device), weights_only=False)
         model = checkpoint['model']
-        # model.rel_embed = None
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
     
     nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
@@ -345,12 +385,34 @@ def main(args):
         for state in optimizer.state.values():
             for k, v in state.items():
                 if torch.is_tensor(v):
-                    state[k] = v.cuda()
+                    state[k] = v.to(device)
     
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
-    model.cuda()
+    if args.finetune == "sts":
+        model.STS = nn.Linear(args.w_dim, 1)
+        # optimizer = torch.optim.AdamW(model.STS.parameters(), lr=1e-5)
+        old_optimizer_dict = checkpoint['optimizer']
+        old_state = old_optimizer_dict['state']
+        old_param_groups = old_optimizer_dict['param_groups']
+        nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
+        emb_params = list(model.emb.parameters())
+        param_list = [nonemb_params, emb_params]
+        lr_list = [1, args.emb_lr_multiplier]
+        optimizer = torch.optim.AdamW([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
+        new_param_groups = optimizer.param_groups
+
+        for group in new_param_groups:
+            for param in group['params']:
+                if param in old_state:
+                    optimizer.state[param] = old_state[param]
+                else:
+                    optimizer.state[param] = {}
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
+        warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
+
+    model.to(device)
     model.train()
 
     best_val_ppl = 1e5
@@ -359,6 +421,7 @@ def main(args):
     remaining_epoch = 0
     
     checkpoint_step = 0
+    mseloss = nn.MSELoss(reduction='none')
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch + 1}")
         num_words = 0
@@ -379,6 +442,10 @@ def main(args):
             # print(startofword_train[i])
             ret, _ = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
                         args.max_relative_length, args.min_relative_length, finetune=args.finetune)
+            if args.finetune == "sts":
+                sts_scores = ret
+                sts_label = torch.tensor(train_sts_score[i]).unsqueeze(1).to(device)
+                ret = mseloss(sts_scores, sts_label)
             
             if args.return_h:
                 raw_loss, hidden = ret
@@ -424,7 +491,10 @@ def main(args):
                 logger.info(f"dev data evaluation ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
             
             if train_step % args.eval_interval == 0 or i == len(train_data)-1:
-                val_ppl, val_uas = eval(dev_data, startofword_dev, model, dev_length, args=args)
+                if args.finetune != "sts":
+                    val_ppl, val_uas = eval(dev_data, startofword_dev, model, dev_length, args=args)
+                else:
+                    val_ppl, val_uas = eval(dev_data, startofword_dev, model, dev_length, args=args, score=dev_sts_score)
 
                 if val_ppl < best_val_ppl:
                     remaining_epoch = 0
@@ -440,8 +510,9 @@ def main(args):
                                 }
                     torch.save(checkpoint, args.save_path) 
                     # model.cuda()
-                    test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args)
-                    logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
+                    if args.finetune != "sts" and args.finetune != "rte":
+                        test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args)
+                        logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
                 elif args.scheduler == 'decay':
                     remaining_epoch += 1
                     if remaining_epoch >= args.decay_interval:
@@ -453,7 +524,8 @@ def main(args):
     end_time = time.time()
     logger.info(f"total time {end_time - start_time:.2f} s")
     logger.info(f"best val ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
-    logger.info(f"best test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
+    if args.finetune != "sts" and args.finetune != "rte":
+        logger.info(f"best test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
     logger.info(f"model saved to {args.save_path}")
     logger.info(f"log saved to {args.log_file}")
     logger.info(f"Done!")

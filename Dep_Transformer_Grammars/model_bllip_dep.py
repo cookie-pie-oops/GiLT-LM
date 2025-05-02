@@ -4,8 +4,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
-from masking_bllip import utils as masking_utils
-from masking_bllip import masking_types as types
+# from masking_bllip import utils as masking_utils
+# from masking_bllip import masking_types as types
 import time
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
@@ -271,7 +271,7 @@ class MLPforBiaffine(nn.Module):
             nn.LayerNorm(concat_dim),
             nn.Linear(concat_dim, d_inner),
             nn.ReLU(),
-            nn.Linear(d_inner, 2*input_dim)
+            nn.Linear(d_inner, input_dim)
         )
 
         nn.init.kaiming_normal_(self.mlp[1].weight, mode='fan_in', nonlinearity='relu')
@@ -320,26 +320,31 @@ class BiaffineAttention(nn.Module):
         #         torch.nn.Embedding(151, embed_len[1]),
         #         torch.nn.Embedding(151, embed_len[2]),
         #         torch.nn.Embedding(151, embed_len[3])])
-        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024),
-                torch.nn.Embedding(151, 1024)])
-        self.dep_to_parent_k = nn.Linear(4 * input_dim, 2 * input_dim, bias=False)
-        self.dep_to_child_k = nn.Linear(4 * input_dim, 2 * input_dim, bias=False)
+        # self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256),
+        #         torch.nn.Embedding(151, 256),
+        #         torch.nn.Embedding(151, 256),
+        #         torch.nn.Embedding(151, 256)])
+        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256),
+                torch.nn.Embedding(151, 256)])
+        self.dep_to_parent_k = nn.Linear(1 * input_dim, 2 * input_dim, bias=False)
+        self.dep_to_child_k = nn.Linear(1 * input_dim, 2 * input_dim, bias=False)
 
         self.type = type
         self.temperature = 1.0
         self.concat_dim = input_dim * 3
 
-        self.f_1 = MLPforBiaffine(input_dim, self.concat_dim, self.concat_dim)
-        self.f_3 = MLPforBiaffine(input_dim, self.concat_dim, self.concat_dim)
+        self.f_1 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)  #3072->3072->2048
+        self.f_3 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)
         self.b_1 = nn.Parameter(torch.rand(input_dim + 1, input_dim + 1))
 
-        self.f_2 = MLPforBiaffine(input_dim // 2, input_dim * 2, input_dim * 2)
-        self.f_4 = MLPforBiaffine(input_dim // 2, input_dim * 2, input_dim * 2)
+        self.f_2 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)  #2048->2048->1024
+        self.f_4 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)
 
         self.pos_emb = PositionalEmbedding(input_dim)
-        self.pos_to_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
+        self.pos_to_parent_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
+        self.pos_to_child_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
         
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
@@ -373,11 +378,15 @@ class BiaffineAttention(nn.Module):
         embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
         embed_biases_child = self.dep_to_child_k(embed_biases_child)
         
-        position = torch.arange(hidden.size(1), device=hidden.device) - torch.arange(hidden.size(1), device=hidden.device).unsqueeze(1)[1:, :]
-        position = (torch.stack([self.pos_emb(pos) for pos in position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
-        pos_info = self.pos_to_k(position)
-        parent_hidden = parent_hidden + pos_info + embed_biases_parent
-        child_hidden = child_hidden + embed_biases_child
+        position = torch.arange(hidden.size(1), device=hidden.device).unsqueeze(1) - torch.arange(hidden.size(1), device=hidden.device)
+        child_position = F.pad(torch.triu(position.T)[:, :-1], (1,0))[:-1, :]
+        parent_position = torch.tril(position)[1:, :]
+        parent_position = (torch.stack([self.pos_emb(pos) for pos in parent_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
+        child_position = (torch.stack([self.pos_emb(pos) for pos in child_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
+        parent_pos_info = self.pos_to_parent_k(parent_position)
+        child_position_info = self.pos_to_child_k(child_position)
+        parent_hidden = parent_hidden + parent_pos_info + embed_biases_parent
+        child_hidden = child_hidden + child_position_info + embed_biases_child
 
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
@@ -410,11 +419,13 @@ class BiaffineAttention(nn.Module):
         embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
         embed_biases_child = self.dep_to_child_k(embed_biases_child)
 
-        position = torch.arange(-child_hidden.size(1), 1, 1.0, device=hidden.device).long()
-        position = self.pos_emb(position).permute(1, 0, 2).repeat(batchsize, 1, 1)
-        pos_info = self.pos_to_k(position)
-        parent_hidden = parent_hidden + pos_info + embed_biases_parent
-        child_hidden = child_hidden + embed_biases_child
+        parent_position = torch.arange(child_hidden.size(1), -1, -1.0, device=hidden.device).long()
+        parent_position = self.pos_emb(parent_position).permute(1, 0, 2).repeat(batchsize, 1, 1)
+        child_position = parent_position[:,1:,:]
+        parent_position_info = self.pos_to_parent_k(parent_position)
+        child_position_info = self.pos_to_child_k(child_position)
+        parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
+        child_hidden = child_hidden + child_position_info + embed_biases_child
 
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
@@ -553,7 +564,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # embed_len = kwargs.pop('embed_len', None)
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.embed_k_net = nn.ModuleList([torch.nn.Linear(self.d_model, self.d_model) for i in range(4)])
+        self.embed_k_net = nn.ModuleList([torch.nn.Linear(256, self.d_model) for i in range(4)])
         # if embed_len[0] is not None:
         # self.rel_embed = nn.ModuleList([torch.nn.Embedding(151, 1024),
         #     torch.nn.Embedding(151, 1024),
@@ -1320,7 +1331,7 @@ class TransformerGrammar(nn.Module):
         prob = logits.view(seq_len, batch, -1)
         prob = prob.permute(0, 2, 1)
         loss = crit(prob, targets)
-        if finetune is not None:
+        if finetune is not None and finetune != "sts":
             mask = torch.zeros_like(loss)
             for j, sent in enumerate(x):
                 if finetune == "sst2":
@@ -1364,6 +1375,9 @@ class TransformerGrammar(nn.Module):
                 return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
                 # return loss, hiddens[9] + hiddens[15]
             return loss, core_out, prob
+        elif finetune == "sts":
+            STS_output = self.STS(hiddens[-1][[len(sent) - 2 for sent in x], [i for i in range(batch)]])
+            return STS_output, prob
         else:
             return loss, prob
 
