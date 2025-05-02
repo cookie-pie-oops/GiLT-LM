@@ -144,7 +144,7 @@ if __name__ == "__main__":
     logger.info("Model path: {}".format(model_path))
     logger.info("Beam size: {}".format(beamsize))
     logger.info("Score beam size: {}".format(scorebeamsize))
-    checkpoint = torch.load(model_path, map_location=torch.device(device))
+    checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
     biaffine_model = checkpoint['biaffine_model']
     model.eval()
@@ -325,14 +325,13 @@ if __name__ == "__main__":
                                     if next_step_beam.abel_to_update(new_score):
                                         degree_list, graph_distance, graph, father_tag = graphinfo.get_info()
                                         # next predict word point to j
-                                        graph[j, sent_index_to_id[i+1]] = 1
-                                        graph[sent_index_to_id[i+1], j] = 1
-                                        graph_distance[j, sent_index_to_id[i+1]] = 1
-                                        graph_distance[sent_index_to_id[i+1], j] = 10
-                                        degree_list[j] += 1
+                                        graph[j + 1, sent_index_to_id[i+1]] = 1
+                                        graph[sent_index_to_id[i+1], j + 1] = 1
+                                        graph_distance[j + 1, sent_index_to_id[i+1]] = 1
+                                        graph_distance[sent_index_to_id[i+1], j + 1] = 10
+                                        degree_list[j + 1] += 1
                                         degree_list[sent_index_to_id[i+1]] += 10
-                                        if j != 0:
-                                            father_tag[j - 1] = 1
+                                        father_tag[j] = 1
                                         new_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
                                         next_step_beam.update(new_score, next(counter), new_graphinfo, k, v, hidden)
                                     
