@@ -239,7 +239,7 @@ class PushdownMultiHeadAttn(nn.Module):
         self.pre_lnorm = pre_lnorm
         self.max_stack_depth = max_stack_depth
         
-        self.beta = nn.Embedding(max_stack_depth, self.n_head * self.d_head) # depth_embed
+        self.beta = nn.Embedding(max_stack_depth, self.d_head) # depth_embed
         
         self.r_net = nn.Linear(d_model, n_head * d_head, bias=False) # r_net for projecting sinuoidal positional embedding
 
@@ -340,10 +340,13 @@ class PushdownMultiHeadAttn(nn.Module):
             
             # d_emb_table: shape [bsz, max_stack_depth, n_head*d_head]
             stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1) # stack_tape: [bsz, qlen, klen] = [B, T, T']
-            d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, n_head*d_head]
+            d_emb_table = self.beta(torch.arange(self.max_stack_depth, device=stack_tape.device).int()) # shape [max_stack_depth, d_head]
+
             
             # Moderate_wk in main branch [max_stack_depth, n_head, d_head] = [max_stack_depth, n_head, head_dim]
-            table_wk = d_emb_table.view(self.max_stack_depth, self.n_head, self.d_head)
+            # expand: [max_stack_depth, d_head] -> [max_stack_depth, n_head, d_head]
+            # print(d_emb_table.shape)
+            table_wk = d_emb_table.unsqueeze(1).expand(-1, self.n_head, -1) # shape [max_stack_depth, n_head, d_head] = [max_stack_depth, n_head, head_dim]
             
             # Moderate_AC in main branch
             table_AC_depth = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, table_wk)) # shape [qlen, max_stack_depth, bsz, n_head] = [T, max_stack_depth, B, n_head]
@@ -418,7 +421,7 @@ class PushdownMultiHeadAttn(nn.Module):
         else:
             ##### residual connection + layer normalization
             output = self.layer_norm(w + attn_out)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         # from utils import tensor_memory
         # print(tensor_memory(output))
@@ -557,8 +560,8 @@ class AttachmentHead(nn.Module):
         # print(q.shape)
         # print(next_word.shape)
         cat_inp = torch.cat([q, next_word], dim=-1)  # (B, T, 2*d_model)
-        q = q.detach().cpu()
-        next_word = next_word.detach().cpu()
+        # q = q.detach()
+        # next_word = next_word.detach()
         next_word_q = self.q_next_word_mlp(cat_inp)    # (B, T, 2*d_model)
         next_word_k = self.k_next_word_mlp(cat_inp)      # (B, T, 2*d_model)
         
@@ -566,8 +569,6 @@ class AttachmentHead(nn.Module):
 
         # 将 k 扩展到每个目标位置： (B, T, D) -> (B, 1, T, D) -> (B, T, T, D)
         k = k.unsqueeze(1).expand(-1, T, -1, -1) # expanded_k
-        # detach k
-        # k = k.detach().cpu()
         
 
         # from utils import tensor_memory
@@ -575,7 +576,7 @@ class AttachmentHead(nn.Module):
         # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
         # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         if False:
             # TODO: gather to save gpu memory, 
             # TODO: but need to separate key_and_stack_mlp
@@ -588,7 +589,7 @@ class AttachmentHead(nn.Module):
             # clip stack_tape to [0, max_stack_depth-1]
             stack_tape = stack_tape.clamp(0, self.max_stack_depth - 1)
             depth_emb = self.beta(stack_tape.int())
-            stack_tape = stack_tape.detach().cpu()
+            # stack_tape = stack_tape.detach()
             # concatenate k and depth_emb
             # print("After depth emb net")
             # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
@@ -599,25 +600,18 @@ class AttachmentHead(nn.Module):
                 torch.cat([k, depth_emb], dim=-1)
             ) # (B, T, T', D+embd_dim) -> (B, T, T', D) 
             # print("k:", tensor_memory(k))
-            torch.cuda.empty_cache()
-            depth_emb = depth_emb.detach().cpu()
-            # print("!! After key stack mlp")
-            # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
-            # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
-            # 计算 attachment logits
+            # torch.cuda.empty_cache()
+            depth_emb = depth_emb.detach()
             # next_word_q: (B, T, D)
             # k_with_info: (B, T, T', D)
             
-            # attach_logits = (next_word_q.unsqueeze(
-            #     2) @ k.transpose(-2, -1)).squeeze(2)  # (B, T, T')
-            
-            # use einsum?
+            # use einsum
             attach_logits = torch.einsum('bid,bijd->bij', next_word_q, k)  # (B, T, T')
                 
-            k = k.detach().cpu()
+            k = k.detach()
             attach_logits.mul_(self.scale) # (B, T, T)
 
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         # print("After attach logits computation")
         # print("k:", tensor_memory(k))
         # print("next_q:", tensor_memory(next_word_q))
@@ -652,7 +646,7 @@ class AttachmentHead(nn.Module):
         # logits = attach_logits_l.scatter(
         #     2, indices, logits_self)  # (B, T, T+1)
         
-        # indices = indices.detach().cpu()
+        # indices = indices.detach()
 
         logits = attach_logits_l.scatter(
             2,
@@ -682,7 +676,7 @@ class AttachmentHead(nn.Module):
         # 1 1 1 1 0
         # 1 1 1 1 1
         logits = logits.masked_fill(mask == 0, float("-inf"))
-        mask = mask.detach().cpu()
+        # mask = mask.detach()
         # import pdb;pdb.set_trace()
 
         # 去掉最上面一行，返回 (B, T, T+1)
@@ -728,14 +722,12 @@ class PushdownTransformerConstituency(nn.Module):
             
         self.layers = nn.ModuleList()
 
-        for _ in range(num_layers - 1):
-            self.layers.append(RelPartialLearnableDecoderLayer(n_head, w_dim, d_head, 
-                                d_inner, dropout, dropoutatt, pre_lnorm=pre_lnorm))
+        for _ in range(num_layers):
+            self.layers.append(RelPartialLearnablePushdownLayer(n_head, w_dim, d_head, d_inner, dropout, dropoutatt,
+                                pre_lnorm=pre_lnorm, max_stack_depth=max_stack_depth))
             
         # PUSHDOWN LAYER FOR CONSTITUENCY
-        self.max_depth = max_stack_depth
-        self.pushdown_final_layer = RelPartialLearnablePushdownLayer(n_head, w_dim, d_head, d_inner, dropout, dropoutatt,
-                                pre_lnorm=pre_lnorm, max_stack_depth=max_stack_depth)
+        self.max_depth = max_stack_depth 
         
         # ATTACHMENT HEAD
         self.attachment_head = AttachmentHead(d_model=w_dim, depth_embd_dim=d_head, max_depth=max_stack_depth, dropout=dropout)
@@ -751,17 +743,6 @@ class PushdownTransformerConstituency(nn.Module):
         self.stack_pad_id = stack_pad_id
         if self.num_layers > 5:
             logging.warning("You have set num_layers >> 1, please init the weights of the model (by kaiming fan in). If you have applied weight init, please ignore this warning.")
-        
-    # def init_weights(self):
-    #     nn.init.normal_(self.r_w_bias, 0.0, 0.02)
-    #     nn.init.normal_(self.r_r_bias, 0.0, 0.02)
-    #     self.emb.weight.data.uniform_(-0.02, 0.02)
-    #     self.projection.weight = self.emb.weight
-    #     self.projection.bias.data.zero_()
-    #     self.attachment_head.init_weights()
-    #     for layer in self.layers:
-    #         layer.init_weights()
-    #     self.pushdown_final_layer.init_weights()
 
     def forward(self, 
                 data, 
@@ -770,7 +751,8 @@ class PushdownTransformerConstituency(nn.Module):
                 attachment_labels,
                 mems=None, 
                 return_h=False,
-                only_w=False):
+                only_w=False,
+                serial_step=32):
         
         # data: x, shape [B, T], ids of tokens seq[:T] where len(seq) = T+1
         # target: y = seq[1:T+1], shape [B, T], ids of tokens seq[1:T+1]
@@ -802,21 +784,17 @@ class PushdownTransformerConstituency(nn.Module):
         
         # DECODER ATTENTION MASK
         
-        dec_attn_mask = torch.triu(
-            word_emb.new_ones(qlen, klen), diagonal=1+mlen).bool()[:,:,None] # FIXED: NOT .byte() ANYMORE but .bool()
+        dec_attn_mask = torch.triu( 
+            word_emb.new_ones(qlen, klen), diagonal=1+mlen).bool()[:,:,None] # FIXED: NOT .byte() ANYMORE but .bool() # shape [qlen, klen, 1]
         # import pdb;pdb.set_trace()
         # INITIAL HIDDEN STATE
         core_out = self.dropout(word_emb)
         pos_emb = self.dropout(pos_emb)
-        
         # FORWARD PASS
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
-                    self.r_r_bias, attn_mask=dec_attn_mask, mems=None)
-            
-        # PUSHDOWN LAYER PART
-        core_out = self.pushdown_final_layer.forward(core_out, pos_emb, self.r_w_bias,
                     self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
+        
         
         # FINAL DROPOUT
         core_out = self.dropout(core_out) # shape [T, B, d_model] # h1, h2, ..., hT
@@ -836,7 +814,23 @@ class PushdownTransformerConstituency(nn.Module):
         # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
         # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
         # print("In")
-        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1]
+        
+        # TODO: PARALLEL -> SERIAL
+        # attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1] # PARALLEL
+        # x shape [qlen, bsz, d_model] = [T, B, d_model]
+        attach_logits = []
+        for b_start in range(0, bsz, serial_step):
+            b_end = min(b_start + serial_step, bsz)
+            # print("b_start", b_start)
+            # print("b_end", b_end)
+            
+            # x shape [qlen, bsz, d_model] = [T, B, d_model]
+            # x permuted shape [bsz, qlen, d_model] = [B, T, d_model]
+            # stack_tape shape [bsz, qlen, klen] = [B, T, T']
+            # next_word permuted shape [bsz, qlen, d_model] = [B, T, d_model]
+            attach_logits.append(self.attachment_head.forward(x = core_out.permute(1, 0, 2)[b_start:b_end], stack_tape = stack_tape[b_start:b_end], next_word = next_word.permute(1, 0, 2)[b_start:b_end])) # shape [B, T, T+1]
+        attach_logits = torch.cat(attach_logits, dim=0) # shape [B, T, T+1]
+        
         # print("After")
         # print("Memory Allocated: ", torch.cuda.memory_allocated() / 1024 / 1024, "MB")
         # print("Memory Reserved: ", torch.cuda.memory_reserved() / 1024 / 1024, "MB")
@@ -854,7 +848,7 @@ class PushdownTransformerConstituency(nn.Module):
         # logging.debug("ATTACH LOGITS")
         # logging.debug(attach_logits.shape)
         # logging.debug("SLICED 2D ATTACH LOGITS")
-        # logging.debug(attach_logits[0, :, :].detach().cpu().numpy())
+        # logging.debug(attach_logits[0, :, :].detach().numpy())
         # attach_logits = attach_logits.masked_fill(attachment_mask == 0, float("-inf")) # because we masked this in the forward pass of attachment_head
         # attach_logits = attach_logits.contiguous() # otherwise may cause error in view
         # attachment_labels = attachment_labels.contiguous()
@@ -867,7 +861,7 @@ class PushdownTransformerConstituency(nn.Module):
         # and make the logits cross-entropy the target
         
         # logging.debug("SLICED 2D LOGITS")
-        # logging.debug(logits[0, :, :].detach().cpu().numpy())
+        # logging.debug(logits[0, :, :].detach().numpy())
         # logits = logits.contiguous()
         # target = target.contiguous()
         loss_words = F.cross_entropy(logits.reshape(-1, self.vocab_size), target.reshape(-1), ignore_index=self.pad_id, reduction='sum')
@@ -905,8 +899,6 @@ class PushdownTransformerConstituency(nn.Module):
         pos_emb = self.dropout(pos_emb)
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
-                    self.r_r_bias, attn_mask=dec_attn_mask, mems=None)
-        core_out = self.pushdown_final_layer.forward(core_out, pos_emb, self.r_w_bias,
                     self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
         core_out = self.dropout(core_out)
         logits_next_word = self.projection(core_out[-1]) # shape [B, vocab_size]
