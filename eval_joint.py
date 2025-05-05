@@ -24,11 +24,16 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
         test_ds = test_ds.select(range(10))
     test_dataloader = torch.utils.data.DataLoader(
         test_ds, 
-        batch_size=1,
+        batch_size=train_args.batch_size,
         shuffle=False,
         num_workers=train_args.num_workers,
         collate_fn=collate_fn,
     )
+    concatenated_attachment_labels = []
+    for i in range(len(test_ds)):
+        concatenated_attachment_labels += test_ds[i]["attachment_labels"]
+    real_max_stack_depth = max(concatenated_attachment_labels)
+
     sp = spm.SentencePieceProcessor()
     sp.Load("./data_process/spm_parsing/BLLIP_spm.model")
     vocab_size = sp.GetPieceSize()
@@ -90,10 +95,15 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
     # eval the parallel module
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
         model.module.eval()
-    
+    logging.info(f"Model loaded from {ckpt}")
+    logging.info(f"Max stack depth: {real_max_stack_depth}")
     with torch.no_grad():
         test_losses_w = []
         test_losses_a = []
+        # tp[i] = tps of i-th attach label
+        tp = [0] * (real_max_stack_depth + 1)
+        pre = [0] * (real_max_stack_depth + 1)
+        tru = [0] * (real_max_stack_depth + 1)
         for _, test_batch in enumerate(test_dataloader):
             ids = test_batch["ids"]
             ids = torch.cat([torch.full((ids.shape[0], 1), model_args.bos_id), ids], dim=1)
@@ -102,13 +112,24 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
             stack_tape = test_batch["stack_tape"].to(device)
             attachment_labels = test_batch["attachment_labels"].to(device)
             # forward
-            loss_w, loss_a = model.forward(
+            loss_w, loss_a, attachment_preds = model.forward(
                 data,
                 target,
                 stack_tape,
                 attachment_labels,
+                return_decoded_attach=True,
             )
-            data, target, stack_tape, attachment_labels = data.detach().cpu(), target.detach().cpu(), stack_tape.detach().cpu(), attachment_labels.detach().cpu()
+            # f1
+            attachment_preds = attachment_preds.view(-1) # [B,T] -> [B*T]
+            attachment_labels = attachment_labels.view(-1) # [B*T]
+            for idx in range(attachment_labels.shape[0]):
+                if attachment_labels[idx] != model_args.stack_pad_id:
+                    tru[attachment_labels[idx]] += 1
+                    pre[attachment_preds[idx]] += 1
+                    if attachment_labels[idx] == attachment_preds[idx]:
+                        tp[attachment_labels[idx]] += 1
+                         
+            # data, target, stack_tape, attachment_labels = data.detach().cpu(), target.detach().cpu(), stack_tape.detach().cpu(), attachment_labels.detach().cpu()
             loss_w = loss_w.detach().cpu().sum()
             loss_a = loss_a.detach().cpu().sum()
             test_losses_w.append(loss_w.item())
@@ -123,16 +144,33 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
         test_loss = test_loss_w + test_loss_a
         word_ppl = torch.exp(torch.tensor(test_loss_w))
         all_ppl = torch.exp(torch.tensor(test_loss))
+        
+        # f1
+        tp = np.array(tp)
+        pre = np.array(pre)
+        tru = np.array(tru)
+        precision = tp / (pre + 1e-10) # prec of each label
+        recall = tp / (tru + 1e-10) # recall of each label
+        macro_f1 = 2 * precision * recall / (precision + recall + 1e-10)
+        macro_f1 = np.mean(macro_f1)
+        # micro f1
+        micro_prec = np.sum(tp) / (np.sum(pre) + 1e-10)
+        micro_rec = np.sum(tp) / (np.sum(tru) + 1e-10)
+        micro_f1 = 2 * micro_prec * micro_rec / (micro_prec + micro_rec + 1e-10)
+        # print(precision, recall)
         logging.info(f"[Joint] Test Loss: {test_loss}, Word PPL: {word_ppl.item()}, # of tokens: {n_words}, Joint PPL: {all_ppl.item()}")
+        logging.info(f"[Joint] Macro F1: {macro_f1}, Micro F1: {micro_f1}")
 
         # write a file about test loss and step (json)
-        with open(f"./ckpt/{train_args.run_name}/best/test.json", "w") as f:
+        with open(f"./ckpt/{train_args.run_name}/best/test_joint.json", "w") as f:
             ddict = {
                 "test_joint_loss": test_loss,
                 "test_word_loss": test_loss_w,
                 "test_attachment_loss": test_loss_a,
                 "test_joint_ppl": all_ppl.item(),
                 "test_word_ppl": word_ppl.item(),
+                "test_macro_f1": macro_f1,
+                "test_micro_f1": micro_f1,
             }
             json.dump(ddict, f)
         logging.info(f"Test finished")

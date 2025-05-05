@@ -97,15 +97,16 @@ def eval_marginal(model_args: ModelConfig,
     # eval the parallel module
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
         model.module.eval()
-
+    
     # ---------- 3. Beam Search ----------
     with torch.no_grad():
         total_log_p_hat = 0.0     # 累加 log Σ_beam p(x,y)
         total_tokens   = 0
-        pbar = tqdm(total=len(dl), desc="Testing")
+        pbar = tqdm(total=len(dl), desc="Testing", disable=DEBUG)
         for one_sample_batch in dl:
-            gold_attach = one_sample_batch["attachment_labels"] # [1, seq_len]
-            beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=gold_attach)
+            # gold_attach = one_sample_batch["attachment_labels"] # [1, seq_len]
+            # print(1)
+            beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=None)
             
             
             # ids: [1, seq_len]
@@ -114,23 +115,31 @@ def eval_marginal(model_args: ModelConfig,
             ids = torch.cat([
                 torch.full((1,1), model_args.bos_id, device=device),
                 ids,
-            ], dim=1) # [1, seq_len+1]
+            ], dim=1) # [1, seq_len+1] WITH BOS AND EOS
             
-            # breakpoint()
-            beams, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
-            if DEBUG:
-                breakpoint()
-            candidate_scores = [b.score for b in beams]
+            _, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
+
+            # candidate_scores = [b.score for b in beams]
             # joint_ppls = [torch.exp(torch.tensor(-b.score / (ids.shape[1]-1))).item() for b in beams]
             # one_ppl = torch.exp(torch.tensor(-log_p_hat / (ids.shape[1]-1))).item()
             one_ppl = np.exp(-log_p_hat.item() / (ids.shape[1]-1))
-            # breakpoint()
-            if DEBUG:
-                logging.info(f"Candidate scores: {candidate_scores}")
+
             total_log_p_hat += log_p_hat.item()
-            total_tokens    += ids.numel() - 1         # 不算 bos
+            total_tokens    += ids.shape[1] - 1
             running_ppl = np.exp(-total_log_p_hat / total_tokens)
-            torch.cuda.empty_cache()
+            
+            if DEBUG:
+                time_left = pbar.format_dict["remaining"]
+                logging.info(f"Log P: {log_p_hat.item():.4f} , "
+                            f"One PPL: {one_ppl:.4f} , "
+                            f"Running PPL: {running_ppl:.4f} , "
+                            f"Total Log P: {total_log_p_hat:.4f} , "
+                            f"Total Tokens: {total_tokens}, "
+                            f"Length: {ids.shape[1]-1}, "
+                            f"Time Left: {time_left}")
+            
+            
+            # torch.cuda.empty_cache()
 
 
             # start to eval gold
@@ -175,6 +184,7 @@ def eval_marginal(model_args: ModelConfig,
                 running_ppl=running_ppl,
                 # gold_log_p_hat=gold_log_p_hat,
                 # gold_one_ppl=gold_one_ppl,
+                length=ids.shape[1]-1,
             )
 
             pbar.update(1)

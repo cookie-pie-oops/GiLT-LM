@@ -38,11 +38,11 @@ class DebugParallelConfig:
 
 @dataclass
 class TrainConfig:
-    run_name = "push_bllip_con_test_gas4"
+    run_name = "push_bllip_con_test_gas1"
     
     seed: int = 12345
     proposed_batch_size: int = 64 # 64?
-    num_workers: int = 0
+    num_workers: int = 4
     epochs: int = 4 # debug: 50, normal: 4
     
     max_lr: float = 1.5e-4 # debug: 1e-2
@@ -59,7 +59,7 @@ class TrainConfig:
     
     max_grad_norm: float = 3.0
     # GAS
-    gradient_accumulation_steps: int = 4 # grad_accumulation_steps * real_batch_size = 64
+    gradient_accumulation_steps: int = 1 # grad_accumulation_steps * real_batch_size = 64
     log_interval: int = 25 * gradient_accumulation_steps # debug: 1, normal: 50
     eval_interval: int = 125 * gradient_accumulation_steps # debug: 1, normal: 250
     
@@ -87,9 +87,9 @@ class DebugTrainConfig:
     
     max_grad_norm: float = 3.0
     # GAS
-    gradient_accumulation_steps: int = 4 # grad_accumulation_steps * real_batch_size = 64
-    log_interval: int = 25 * gradient_accumulation_steps # debug: 1, normal: 50
-    eval_interval: int = 125 * gradient_accumulation_steps # debug: 1, normal: 250
+    gradient_accumulation_steps: int = 1 # grad_accumulation_steps * real_batch_size = 64
+    log_interval: int = 100 * gradient_accumulation_steps # debug: 1, normal: 50
+    eval_interval: int = 500 * gradient_accumulation_steps # debug: 1, normal: 250
     
     batch_size: int = proposed_batch_size // gradient_accumulation_steps
     warmup_steps: int = proposed_warmup_steps * gradient_accumulation_steps
