@@ -752,7 +752,8 @@ class PushdownTransformerConstituency(nn.Module):
                 mems=None, 
                 return_h=False,
                 only_w=False,
-                serial_step=32):
+                serial_step=16,
+                return_decoded_attach=False):
         
         # data: x, shape [B, T], ids of tokens seq[:T] where len(seq) = T+1
         # target: y = seq[1:T+1], shape [B, T], ids of tokens seq[1:T+1]
@@ -819,6 +820,9 @@ class PushdownTransformerConstituency(nn.Module):
         # attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1] # PARALLEL
         # x shape [qlen, bsz, d_model] = [T, B, d_model]
         attach_logits = []
+        # if length < 100 then serial_step = 32
+        if qlen < 100:
+            serial_step *= 2 # for small length
         for b_start in range(0, bsz, serial_step):
             b_end = min(b_start + serial_step, bsz)
             # print("b_start", b_start)
@@ -869,9 +873,13 @@ class PushdownTransformerConstituency(nn.Module):
         
         if return_h:
             return loss_words, loss_attach, core_out
+        elif return_decoded_attach:
+            decoded_attach = torch.argmax(attach_logits, dim=-1) # shape [B, T]
+            return loss_words, loss_attach, decoded_attach
         else:
             return loss_words, loss_attach
-        
+    
+    @torch.no_grad()
     def take_step_silver_tree(self, 
                             ids, # shape [qlen+1, bsz]. the real seq is [qlen + 1, bsz] while first is bos and last is eos
                             stack_tape, # shape [bsz, step, step]
@@ -887,6 +895,7 @@ class PushdownTransformerConstituency(nn.Module):
         # ids: [bsz, qlen+1]
         # src = ids.transpose(0, 1)[:step+1]
         # tgt = ids.transpose(0, 1)[step+1]
+        self.eval()
         src, next_tgt, tgt = ids.transpose(0, 1)[:step], ids.transpose(0, 1)[step], ids.transpose(0, 1)[1:step+1]
         
         word_emb = self.emb(src) # shape [T, B, d_model]
@@ -895,8 +904,9 @@ class PushdownTransformerConstituency(nn.Module):
         pos_emb = self.pos_emb(pos_seq)
         dec_attn_mask = torch.triu(
             word_emb.new_ones(src.size(0), src.size(0)), diagonal=1).bool()[:,:,None]
-        core_out = self.dropout(word_emb)
-        pos_emb = self.dropout(pos_emb)
+        # core_out = self.dropout(word_emb) # NOTE: BECAUSE IN EVAL MODE
+        # pos_emb = self.dropout(pos_emb)
+        core_out = word_emb
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
                     self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
