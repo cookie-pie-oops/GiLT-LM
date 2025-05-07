@@ -925,7 +925,7 @@ class PushdownTransformerConstituency(nn.Module):
         
         attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1]
         logits_next_attach = attach_logits[:, -1, :].squeeze(1) # shape [B, T+1]
-        
+
         # postprocess logits_next_attach
         for batch_idx, reduced_set in enumerate(list_reduced):
             for reduced_pos in reduced_set:

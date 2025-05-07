@@ -100,16 +100,18 @@ class BeamSearchDepthBased:
             # scores_word, scores_attach_time = model.take_step_silver_tree(ids, stack_tape, list_reduced, now_step)
             scores_word = []
             scores_attach_time = []
-            for i in range(0, self.beam_size, serial_step):
+            now_size = len(beam_curr)
+            for i in range(0, now_size, serial_step):
                 # get the scores for the new candidates
                 # ids: [beam_size, seqlen]
                 # reduced_set: [beam_size,] and every element is a set of reduced attachment decisions
                 # stack_tape: [beam_size, step, step] 
                 # model: a function that takes in ids and returns scores
+                end = min(i+serial_step, now_size)
                 scores_word_tmp, scores_attach_time_tmp = model.take_step_silver_tree(
-                    ids[i:i+serial_step], 
-                    stack_tape[i:i+serial_step], 
-                    list_reduced[i:i+serial_step],
+                    ids[i:end],
+                    stack_tape[i:end],
+                    list_reduced[i:end],
                     now_step
                 )
                 scores_word.append(scores_word_tmp)
@@ -233,6 +235,7 @@ class BeamSearchDepthBased:
     @staticmethod
     def _update_reduced_states(reduced_state, stack_pred, step_prime):
         ### if stack_pred != step_prime = last_step + 1, then everything from stack_pred to step is reduced
+        # breakpoint()
         for elem in range(stack_pred, step_prime):
             reduced_state.add(elem)
     
@@ -249,27 +252,33 @@ class BeamSearchDepthBased:
         """
 
         ### this is the last step, we don't care about updating stacks at this point if we are synchronous
-        if step_prime == len(depths[0]) - 1:
+        if step_prime == len(depths[0]) - 1: # last step
             return stacks, reduced_states, depths
 
         for idx, (stack, stack_pred) in enumerate(zip(stacks, attachment_decisions)):
             ### stack is a list of constituents, each constituent is a list of indices
             ### add [step] into stack_state
+            # breakpoint()
             if BeamSearchDepthBased._no_reduce_op(stack_pred, step_prime):
                 stack.append([step_prime])
             else:
                 BeamSearchDepthBased._update_reduced_states(reduced_states[idx], stack_pred, step_prime)
                 curr_constituent = [step_prime]
+                # breakpoint()
                 while len(stack) > 1 and stack_pred not in stack[-1]:
                     top = stack.pop()
                     curr_constituent = top + curr_constituent
-                    for c in curr_constituent:
-                        depths[idx][c] += 1
+                    for cons in curr_constituent:
+                        depths[idx][cons] += 1
+                # breakpoint()
                 top = stack.pop()
                 curr_constituent = top + curr_constituent
-                for c in curr_constituent:
-                    depths[idx][c] += 1
+                # breakpoint()
+                for cons in curr_constituent:
+                    depths[idx][cons] += 1
+                # breakpoint()
                 stack.append(curr_constituent)
+            # breakpoint()
         return stacks, reduced_states, depths 
     
     def __call__(self, 
@@ -283,18 +292,27 @@ class BeamSearchDepthBased:
         # gold_attach  shape: [bsz, seqlen]
         assert ids.shape[0] == 1, "Beam search only supports batch size of 1 for now."
         # logging.info("in")
-        beam_curr = [self.init_beam() for _ in range(self.beam_size)]
+        beam_curr = [self.init_beam()]
         # beam_curr: [beam_size]
         seqlen = ids.shape[1]
-        stack_tape = torch.zeros((self.beam_size, seqlen, seqlen), dtype=torch.long, device=ids.device)
-        stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long, device=ids.device)
-        list_reduced = [set() for _ in range(self.beam_size)]
-        stacks_history = [[[0]] for _ in range(self.beam_size)]
+        
+        
+        # stack_tape = torch.zeros((self.beam_size, seqlen, seqlen), dtype=torch.long, device=ids.device)
+        # stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long, device=ids.device)
+        # stack_tape_dict = {} # stack_tape[attachment_decision_seq] = ...
+        stack_tape_dict = {tuple(): torch.zeros((1, seqlen, seqlen), dtype=torch.long, device=ids.device)}
+        stack_tape_one_row_dict = {tuple(): torch.zeros((1, seqlen), dtype=torch.long, device=ids.device)}
+        list_reduced = []
+        list_reduced_dict = {tuple(): set()}
+        stacks_to_maintain = []
+        stacks_to_maintain_dict = {tuple(): [[0]]}
         
         # gold_not_found_step = None
         if return_trail:
             prefix_marginal_score_trajectory = []
         for step_prime in range(1, seqlen):
+            # if step_prime > 4:
+            #     exit()
             # logging.info(f"Step: {step_prime}")
             # breakpoint()
             # step_prime is the step we are at, i.e. the number of attachment decisions made so far
@@ -303,39 +321,68 @@ class BeamSearchDepthBased:
             # stack_tape: [bsz, beam_size, max_stack_depth]
             # model: a function that takes in ids and returns scores
             # stack_tape_tmp = stack_tape[:, :step_prime, :step_prime]
+            
+            # stack_tape gathered from stack_tape_dict
+            # stack_tape = np.zeros((self.beam_size, seqlen, seqlen), dtype=np.long)
+            # stack_tape_one_row = np.zeros((self.beam_size, seqlen), dtype=np.long)
+            stack_tape = torch.zeros((len(beam_curr), seqlen, seqlen), dtype=torch.long, device=ids.device)
+            # stack_tape_one_row = torch.zeros((self.beam_size, seqlen), dtype=torch.long, device=ids.device)
+            # stacks_to_maintain = []
+            # list_reduced = []
+            
+            for i, beam in enumerate(beam_curr):
+                stack_tape[i] = stack_tape_dict[tuple(beam.attachment_decisions)]
+                list_reduced.append(
+                    deepcopy(list_reduced_dict[tuple(beam.attachment_decisions)])
+                )
             beam_curr = self.update_beam(ids, model, beam_curr, list_reduced, stack_tape[:, :step_prime, :step_prime])
+            # breakpoint()
             # logging.info(f"Step {step_prime}, Returned beams: {[round(b.score, 1) for b in beam_curr]}")
             # get attach decisions of all beams
+            # aggregate dict into lists for batch operation
             attach_decision_recent = [
                 b.attachment_decisions[-1] for b in beam_curr
             ]
-            # at_d = [b.attachment_decisions for b in beam_curr]
-            # see if gold is in the beam
-            # found = False
-            # if self.gold_attach is not None:
-            #     for i, b in enumerate(beam_curr):
-            #         if self.gold_attach[0][:step_prime] == b.attachment_decisions:
-            #             # logging.info(f"Gold attachment decision FOUND in beam {i}: {b.attachment_decisions}")
-            #             # we can break here because we only need to find one
-            #             found = True
-            #             break
-            # if not found and gold_not_found_step is None and self.gold_attach is not None:
-            #     gold_not_found_step = step_prime
-            #     logging.debug(f"Gold attachment decision started to be NOT found in beam: {self.gold_attach[0][:step_prime]}, step: {gold_not_found_step}, seqlen: {seqlen}")
-            # breakpoint()
-            
-            list_reduced = deepcopy(list_reduced)
-            stacks_history = deepcopy(stacks_history)
-            
+            # stack_tape = np.zeros((self.beam_size, seqlen, seqlen), dtype=np.long)
+            # stack_tape_one_row = np.zeros((self.beam_size, seqlen), dtype=np.long)
+            stack_tape = torch.zeros((len(beam_curr), seqlen, seqlen), dtype=torch.long, device=ids.device)
+            stack_tape_one_row = torch.zeros((len(beam_curr), seqlen), dtype=torch.long, device=ids.device)
+            stacks_to_maintain = []
+            list_reduced = []
+            for i, beam in enumerate(beam_curr):
+                key = tuple(beam.attachment_decisions)[:-1]
+                stack_tape[i] = stack_tape_dict[key]
+                stack_tape_one_row[i] = stack_tape_one_row_dict[key]
+                stacks_to_maintain.append(deepcopy(stacks_to_maintain_dict[key]))
+                list_reduced.append(deepcopy(list_reduced_dict[key]))
             # update stacks and things
-            stacks_history, list_reduced, stack_tape_one_row = self._update_stacks(
+            # breakpoint()
+            stacks_to_maintain, list_reduced, stack_tape_one_row = self._update_stacks(
                 reduced_states=list_reduced,
-                stacks=stacks_history,
+                stacks=stacks_to_maintain,
                 attachment_decisions=attach_decision_recent,
                 step_prime=step_prime,
                 depths=stack_tape_one_row
-            )
+            ) # -> list
             stack_tape[:, step_prime, :] = stack_tape_one_row.clone()
+            # input back to the dict
+            stack_tape_dict = {} # stack_tape[attachment_decision_seq] = ...
+            stack_tape_one_row_dict = {}
+            # list_reduced = [set() for _ in range(self.beam_size)]
+            list_reduced_dict = {}
+            # stacks_to_maintain = [[[0]] for _ in range(self.beam_size)]
+            stacks_to_maintain_dict = {}
+            for i, beam in enumerate(beam_curr):
+                key = tuple(beam.attachment_decisions)
+                # print("key: ", key)
+                # print("stacks_to_maintain: ", stacks_to_maintain[i])
+                # print("list_reduced: ", list_reduced[i])
+                # print("stack_tape: ", stack_tape[i])
+                # print("stack_tape_one_row: ", stack_tape_one_row[i])
+                stack_tape_dict[key] = stack_tape[i]
+                stack_tape_one_row_dict[key] = stack_tape_one_row[i]
+                list_reduced_dict[key] = list_reduced[i]
+                stacks_to_maintain_dict[key] = stacks_to_maintain[i]
             
             # now compute a logsumexp, i.e. marginal log prob, then put into marginal_log_prob_trajectory
             if return_trail:
@@ -349,12 +396,9 @@ class BeamSearchDepthBased:
                 )
             
         # return: beams
-        # marginal log prob = logsumexp([b.score for b in beam_curr])
         # marginal_log_prob = logsumexp([b.score for b in beam_curr]) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
         marginal_log_prob = torch.logsumexp(torch.tensor([b.score - b.score_seq[-1][1] for b in beam_curr]), dim=0)
-        # breakpoint()
         # i.e. TODO: MARGINAL PPL = exp(-1/sum(lengths)*sum(marginal log prob))
-        
         if return_trail:
             return beam_curr, marginal_log_prob, prefix_marginal_score_trajectory
         else:
