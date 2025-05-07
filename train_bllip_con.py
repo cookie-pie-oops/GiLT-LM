@@ -277,6 +277,8 @@ def main(model_args: ModelConfig, train_args: TrainConfig, parallel_args: Parall
             loss_w = loss_w.sum() # for dataparallel
             loss_a = loss_a.sum()
             loss = (loss_w + train_args.attachment_ratio * loss_a) / (1 + train_args.attachment_ratio)
+            if False:
+                loss /= batch["lengths"].sum() # divide by sum of lengths
             # 3.3.3 backward
             # divide by grad_accumulation_steps
             # in place

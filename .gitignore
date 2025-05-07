@@ -24,3 +24,4 @@ ckpt/
 wandb/
 *.tgz
 log.md
+sg_probe.py

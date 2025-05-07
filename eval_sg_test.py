@@ -12,7 +12,7 @@ from beam_search_utils import BeamSearchDepthBased
 import random
 import gc
 from utils import get_suite_type, eval_math_expr
-DEBUG = False
+verbose = True
 
 class TestSuiteParser:
     def __init__(self, test_suite_file):
@@ -119,7 +119,7 @@ def eval_sg(model_args: ModelConfig,
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
         # model = torch.nn.DataParallel(model)
         logging.warning("This script does not support DataParallel.")
-
+    # train_args.run_name = "push_bllip_con_test_gas4_only_1_pushdown"
     ckpt = f"./ckpt/{train_args.run_name}/best/model.pt"
     state_dict = torch.load(ckpt, map_location=device, weights_only=True)
     if isinstance(model, torch.nn.DataParallel):
@@ -139,7 +139,9 @@ def eval_sg(model_args: ModelConfig,
             for k, v in state_dict.items():
                 new_state_dict[k[7:]] = v
             state_dict = new_state_dict
-    model.load_state_dict(state_dict, strict=True)
+    # print(state_dict.keys())
+    model.load_state_dict(state_dict, strict=False)
+    
     model.eval()
 
     random.seed(train_args.seed)
@@ -164,20 +166,25 @@ def eval_sg(model_args: ModelConfig,
     final_acc = []
     final_acc_per_type = {}
     logging.info("# of tests: {}".format(len(file_list)))
-    for file in file_list:
+    for ii, file in enumerate(file_list):
         test_suite_parser = TestSuiteParser(file[:-5])
         logging.info("-" * 100)
         logging.info("Testing on file: {}".format(file[:-5]))
+        logging.info("Test number: {}".format(ii))
         suite_type = get_suite_type(file[:-5])
         acc = 0.0
         logging.info(f"Suite type: {suite_type}")
+        logging.info(f"Formula: {test_suite_parser.meta_data['formula']}")
+       
         # ---------- 3. Beam Search ----------
-        for sample_idx in tqdm(range(len(test_suite_parser.meta_data["data"])), desc=f"Evaluating {file}", disable=DEBUG):
+        for sample_idx in tqdm(range(len(test_suite_parser.meta_data["data"])), desc=f"Evaluating {file}", disable=verbose):
             examples = test_suite_parser.get_example(sample_idx)
             phen2surprisals = {}
             beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=None)
             for phen in examples:
-                sent_list = examples[phen] + ["."]
+                sent_list = examples[phen]
+                # if sent_list[-1] and sent_list[-1][-1] not in [".", "!", "?"]:
+                #     sent_list += ["."]
                 ids_ori = sp.Encode(sent_list, out_type=int) # `encoded` in reference script
                 
                 
@@ -192,7 +199,8 @@ def eval_sg(model_args: ModelConfig,
                     word_idx += len(word)
                     tgt_idx.append((prev_idx, word_idx))
                     prev_idx = word_idx
-                tgt_idx = tgt_idx[1:-1]
+                tgt_idx = tgt_idx[1:] # remove the first and last one, which are bos and eos
+                # breakpoint()
                 # e.g.
                 # tgt_idx: [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 7), (7, 9), (9, 11)]
                 # ids_ori (not processed, w/o bos and eos): [[76], [7268], [74], [63], [5865], [60, 8063], [7400, 73], [60, 61]]
@@ -213,28 +221,29 @@ def eval_sg(model_args: ModelConfig,
                 prefix_trajectories = (-torch.tensor(prefix_trajectories)).tolist() # -> prefix list of surprisals
                 prefix_trajectories = [0] + prefix_trajectories # add the first one
                 # prefix_trajectories: [0=-log p(x0), -log p(x1|x0), -log p(x2|x0,x1), ...]
+                # breakpoint()
                 target_surprisals = [
                     prefix_trajectories[tgt_idx[i][1]] - prefix_trajectories[tgt_idx[i][0]]
                     for i in range(len(tgt_idx))
                 ] # -log p(xt | x<xt)
-               
+                # breakpoint()
                 # --- Things above can be freely adapted to other beam search implementations ---
                 phen2surprisals[phen] = [0] + target_surprisals
-                # breakpoint()
+                
             
             extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
             test_suite_parser.answers[sample_idx] = extracted_formula
             answer = eval_math_expr(extracted_formula)
             if not math.isnan(answer):
                 acc += answer
-                if DEBUG:
+                if verbose:
                     logging.info(f"Example {sample_idx}/{len(test_suite_parser.meta_data["data"])}: {examples} -> [{extracted_formula}] == {answer}")
                     logging.info(f"True/All: {acc}/{sample_idx + 1}")
             else:
                 logging.error(f"Invalid formula: {extracted_formula}")
                 raise ValueError(f"Invalid formula: {extracted_formula}")
         
-        acc /= len(test_suite_parser.answers)
+        acc /= len(test_suite_parser.answers) if len(test_suite_parser.answers) > 0 else 0.
         final_acc.append(acc)
         if suite_type not in final_acc_per_type:
             final_acc_per_type[suite_type] = [acc]

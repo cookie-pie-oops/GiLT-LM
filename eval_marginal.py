@@ -73,7 +73,7 @@ def eval_marginal(model_args: ModelConfig,
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
 
-    ckpt = f"./ckpt/{train_args.run_name}/best/model.pt"
+    ckpt = f"./ckpt/{train_args.run_name}/epoch_3/model.pt"
     state_dict = torch.load(ckpt, map_location=device, weights_only=True)
     if isinstance(model, torch.nn.DataParallel):
         # if module. not in state_dict.keys():
@@ -117,7 +117,7 @@ def eval_marginal(model_args: ModelConfig,
                 ids,
             ], dim=1) # [1, seq_len+1] WITH BOS AND EOS
             
-            _, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
+            beams, log_p_hat = beam_searcher(model, ids)   # 已经返回 log Σ_beam p(x,y)
 
             # candidate_scores = [b.score for b in beams]
             # joint_ppls = [torch.exp(torch.tensor(-b.score / (ids.shape[1]-1))).item() for b in beams]
@@ -137,7 +137,11 @@ def eval_marginal(model_args: ModelConfig,
                             f"Total Tokens: {total_tokens}, "
                             f"Length: {ids.shape[1]-1}, "
                             f"Time Left: {time_left}")
-            
+                beam_scores = [b.score for b in beams]
+                logging.info(f"Sentence: {sp.decode(ids[0].cpu().tolist())}")
+                logging.info(f"Pieces: {sp.id_to_piece(ids[0].cpu().tolist())}")
+                logging.info(f"Beam Scores: {beam_scores}")
+                # exit()
             
             # torch.cuda.empty_cache()
 
@@ -215,14 +219,14 @@ if __name__ == "__main__":
     train_args    = TrainConfig()
     parallel_args = ParallelConfig()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(f"./ckpt/{train_args.run_name}/best/test_beam.log"),
-            logging.StreamHandler()
-        ]
-    )
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format="%(asctime)s - %(levelname)s - %(message)s",
+    #     handlers=[
+    #         logging.FileHandler(f"./ckpt/{train_args.run_name}/best/test_beam.log"),
+    #         logging.StreamHandler()
+    #     ]
+    # )
 
     eval_marginal(model_args, train_args, parallel_args, beam_size=300)
     gc.collect()

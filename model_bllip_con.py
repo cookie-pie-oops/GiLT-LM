@@ -897,6 +897,7 @@ class PushdownTransformerConstituency(nn.Module):
         # tgt = ids.transpose(0, 1)[step+1]
         self.eval()
         src, next_tgt, tgt = ids.transpose(0, 1)[:step], ids.transpose(0, 1)[step], ids.transpose(0, 1)[1:step+1]
+        # src = ids.transpose(0, 1)[:step] # shape [step, bsz]
         
         word_emb = self.emb(src) # shape [T, B, d_model]
         pos_seq = torch.arange(src.size(0)-1, -1, -1.0, device=word_emb.device, 
@@ -906,28 +907,30 @@ class PushdownTransformerConstituency(nn.Module):
             word_emb.new_ones(src.size(0), src.size(0)), diagonal=1).bool()[:,:,None]
         # core_out = self.dropout(word_emb) # NOTE: BECAUSE IN EVAL MODE
         # pos_emb = self.dropout(pos_emb)
-        core_out = word_emb
+        core_out = word_emb # shape [T, B, d_model]
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
                     self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
-        core_out = self.dropout(core_out)
+        core_out = self.dropout(core_out) # shape [T, B, d_model]
         logits_next_word = self.projection(core_out[-1]) # shape [B, vocab_size]
         # log softmax
-        logits_next_word = F.log_softmax(logits_next_word, dim=-1)
+        logits_next_word = F.log_softmax(logits_next_word, dim=-1) # shape [B, vocab_size]
         # the logprobs of the next word (in next_tgt)
         # use gather
         # next_tgt shape: [B]
         logprobs_next_word_tgt = torch.gather(logits_next_word, 1, next_tgt.unsqueeze(1)).squeeze(1) # shape [B]
         
         # for attachment
-        next_word = self.emb(tgt)
-        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2))
+        next_word = self.emb(tgt) # shape [T, B, d_model]
+        
+        attach_logits = self.attachment_head.forward(x = core_out.permute(1, 0, 2), stack_tape = stack_tape, next_word = next_word.permute(1, 0, 2)) # shape [B, T, T+1]
         logits_next_attach = attach_logits[:, -1, :].squeeze(1) # shape [B, T+1]
         
         # postprocess logits_next_attach
         for batch_idx, reduced_set in enumerate(list_reduced):
             for reduced_pos in reduced_set:
-                logits_next_attach[batch_idx, reduced_pos] = -float('inf')
+                logits_next_attach[batch_idx, reduced_pos] = float('-inf')
+        
         logits_next_attach = F.log_softmax(logits_next_attach, dim=-1)
         # breakpoint()
         # logprobs_next_word_tgt: the log prob of the next word (exactly that word, not a prob distribution), in a batch
