@@ -2,11 +2,10 @@
 # x{1:n} is given for every step from 1 to n.
 
 import numpy as np
-from heapq import heapify, heappush, heappop, heappushpop
+from heapq import heapify, heappush, heappop, heappushpop, heapreplace
 from typing import List, Tuple
 import torch
 from copy import deepcopy
-from model_bllip_con import PushdownTransformerConstituency
 import logging
 import torch.nn as nn
 class BeamObj:
@@ -34,17 +33,6 @@ def logsumexp(x):
     max_x = np.max(x)
     return max_x + np.log(np.sum(np.exp(x - max_x)))
 
-# class TakeStepParallelWrapper(nn.Module):
-#     def __init__(self, core_model: PushdownTransformerConstituency):
-#         super().__init__()
-#         self.core = core_model          # PushdownTransformerConstituency 实例
-
-#     def forward(self, ids, stack_tape, reduced_mask, step):
-#         # reduced_mask 必须是 [B, step+1] 的 bool Tensor
-#         return self.core.take_step_silver_tree(
-#             ids, stack_tape, reduced_mask, step
-#         )
-
 class BeamSearchDepthBased:
     """
     Beam Search given the whole sequence of attachment decisions.
@@ -52,10 +40,6 @@ class BeamSearchDepthBased:
     """
     def __init__(self, beam_size=300, gold_attach=None):
         self.beam_size = beam_size
-
-        if isinstance(gold_attach, torch.Tensor):
-            gold_attach = gold_attach.tolist()
-        self.gold_attach = gold_attach
     
         
     def update_beam(self,
@@ -77,11 +61,12 @@ class BeamSearchDepthBased:
 
         # id batch size = id[0]
         # beam batch size = [beam_size] !!!
-        beam_next = [] # [beam_size]
+        beam_next_sort = [] # [beam_size]
         # beam_next_heap = []
         now_step = beam_curr[0].step + 1 # we want to predict the next step
         # ids expand to [beam_size, seqlen]
-        ids = ids.expand(self.beam_size, -1)
+        now_size = len(beam_curr)
+        ids = ids.expand(now_size, -1)
         seqlen = ids.shape[1]
         # beam_size = self.beam_size
         # if seqlen < self.beam_size:
@@ -100,7 +85,7 @@ class BeamSearchDepthBased:
             # scores_word, scores_attach_time = model.take_step_silver_tree(ids, stack_tape, list_reduced, now_step)
             scores_word = []
             scores_attach_time = []
-            now_size = len(beam_curr)
+            
             for i in range(0, now_size, serial_step):
                 # get the scores for the new candidates
                 # ids: [beam_size, seqlen]
@@ -161,19 +146,20 @@ class BeamSearchDepthBased:
                                         new_attachment_decisions, 
                                         now_step)
                     # add the new beam object to the heap
-                    # NOTE: HEAP OPERATION -> TORCH TOPK?
+                    # NOTE: heap operation, torch topk, sort()?
                     # if len(beam_next_heap) < self.beam_size:
                     #     heappush(beam_next_heap, (candidate_score, new_beam_obj)) # because we want to maximize the score,
                     #     # we need to push the negative score to mimic a max heap with a min heap
                     # elif candidate_score > beam_next_heap[0][0]: # if the score is better and the heap is full, we need to pop the worst one
                     #     popped = heappushpop(beam_next_heap, (candidate_score, new_beam_obj))
 
-                    beam_next.append(new_beam_obj)
+                    beam_next_sort.append(new_beam_obj)
         elif now_step == seqlen-1: # -> we are at the end of the sequence
             # with logprob = 0, i.e. prob = 1, we predict eos (or pad)
             for i, beam_obj in enumerate(beam_curr):
-                # eos_attach_score = scores_attach_time[i][0].item()
-                eos_attach_score = 0
+                eos_attach_score = scores_attach_time[i][0].item()
+                # logging.info(f"EOS attach score: {eos_attach_score}")
+                # eos_attach_score = 0
                 new_score = beam_obj.score + scores_word[i].item() + eos_attach_score
                 new_attachment_decisions = beam_obj.attachment_decisions + [0]
                 new_beam_obj = BeamObj(new_score, 
@@ -186,38 +172,35 @@ class BeamSearchDepthBased:
                                         new_attachment_decisions,
                                         now_step)
                 
-                # NOTE: heap operation -> torch topk
+                # NOTE: heap operation, torch topk, sort()?
                 # if len(beam_next_heap) < self.beam_size:
                 #     heappush(beam_next_heap, (new_score, new_beam_obj))
                 # elif new_score > beam_next_heap[0][0]:
-                #     popped = heappushpop(beam_next_heap, (new_score, new_beam_obj))
-                beam_next.append(new_beam_obj)
+                #     heapreplace(beam_next_heap, (new_score, new_beam_obj))
+                beam_next_sort.append(new_beam_obj)
         else:
             raise ValueError("Invalid step!")
 
         # torch topk
-        # logging.info(f"Original: {[round(b.score, 1) for b in beam_next]}")
-        if len(beam_next) > self.beam_size:
-            # logging.info("=" * 50)
-            
-            # _, topk_indices = torch.topk(torch.tensor([b.score for b in beam_next]), self.beam_size)
-            # topk_indices = topk_indices.tolist()
-            # real_beam_next = [beam_next[i] for i in topk_indices]
-            
-            # sorted -> topk
-            beam_next.sort(reverse=True, key=lambda x: x.score)
-            real_beam_next = beam_next[:self.beam_size]
-            
+        if len(beam_next_sort) > self.beam_size:
+            beam_scores = torch.tensor([b.score for b in beam_next_sort], device=ids.device)
+            # topk
+            _, topk_indices = torch.topk(beam_scores, self.beam_size)
+            # get the topk beams
+            real_beam_next = [beam_next_sort[i] for i in topk_indices.tolist()]
         else:
-            real_beam_next = beam_next
+            real_beam_next = beam_next_sort
+        # heap to real beam next
+        # real_beam_next = [b[1] for b in beam_next_heap]
         # assert len(real_beam_next) <= self.beam_size, f"Beam size exceeded: {len(real_beam_next)} > {self.beam_size}"
         # heap_scores = [b[0] for b in beam_next_heap]
         # true_scores = [b.score for b in real_beam_next]
-        # print("heap scores logsumexp: ", logsumexp(bug_scores))
+        # print("heap scores logsumexp: ", logsumexp(heap_scores))
         # print("true scores logsumexp: ", logsumexp(true_scores))
         # logging.info(f"Sorted: {[round(b.score, 1) for b in real_beam_next]}")
         # logging.info("=" * 50)
-        return deepcopy(real_beam_next)
+        # return deepcopy(real_beam_next)
+        return real_beam_next
     
     def init_beam(self):
         return BeamObj(
@@ -379,10 +362,10 @@ class BeamSearchDepthBased:
                 # print("list_reduced: ", list_reduced[i])
                 # print("stack_tape: ", stack_tape[i])
                 # print("stack_tape_one_row: ", stack_tape_one_row[i])
-                stack_tape_dict[key] = stack_tape[i]
-                stack_tape_one_row_dict[key] = stack_tape_one_row[i]
-                list_reduced_dict[key] = list_reduced[i]
-                stacks_to_maintain_dict[key] = stacks_to_maintain[i]
+                stack_tape_dict[key] = stack_tape[i].clone()
+                stack_tape_one_row_dict[key] = stack_tape_one_row[i].clone()
+                list_reduced_dict[key] = deepcopy(list_reduced[i])
+                stacks_to_maintain_dict[key] = deepcopy(stacks_to_maintain[i])
             
             # now compute a logsumexp, i.e. marginal log prob, then put into marginal_log_prob_trajectory
             if return_trail:
@@ -396,13 +379,11 @@ class BeamSearchDepthBased:
                 )
             
         # return: beams
-        # marginal_log_prob = logsumexp([b.score for b in beam_curr]) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
-        marginal_log_prob = torch.logsumexp(torch.tensor([b.score - b.score_seq[-1][1] for b in beam_curr]), dim=0)
+        marginal_log_prob = torch.logsumexp(torch.tensor([b.score for b in beam_curr]), dim=0) # log p(x)_{1:n} where we want to know -1/N(all sents) * sum(marginal of all sents)
+        # marginal_log_prob = torch.logsumexp(torch.tensor([b.score - b.score_seq[-1][1] for b in beam_curr]), dim=0)
         # i.e. TODO: MARGINAL PPL = exp(-1/sum(lengths)*sum(marginal log prob))
         if return_trail:
             return beam_curr, marginal_log_prob, prefix_marginal_score_trajectory
         else:
             return beam_curr, marginal_log_prob
 
-        
-        

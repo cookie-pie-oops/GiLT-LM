@@ -11,6 +11,10 @@ import gc
 import random, os
 from collate import collate_fn
 DEBUG = False
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
+script_args = parser.parse_args()
 
 @torch.inference_mode()
 def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: ParallelConfig):
@@ -24,7 +28,7 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
         test_ds = test_ds.select(range(10))
     test_dataloader = torch.utils.data.DataLoader(
         test_ds, 
-        batch_size=train_args.batch_size,
+        batch_size=train_args.batch_size if not DEBUG else 1,
         shuffle=False,
         num_workers=train_args.num_workers,
         collate_fn=collate_fn,
@@ -71,7 +75,7 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
     if parallel_args.parallel == 'dp':
         model = torch.nn.DataParallel(model)
 
-    ckpt = f"./ckpt/{train_args.run_name}/best/model.pt"
+    ckpt = f"./ckpt/{script_args.run_name}/best/model.pt"
     state_dict = torch.load(ckpt, map_location=device, weights_only=True)
     if isinstance(model, torch.nn.DataParallel):
         # if module. not in state_dict.keys():
@@ -134,7 +138,9 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
             loss_a = loss_a.detach().cpu().sum()
             test_losses_w.append(loss_w.item())
             test_losses_a.append(loss_a.item())
-            # running_ppl = torch.exp(torch.tensor((loss_w + loss_a) / (ids.shape[1] - 1)))
+            # if DEBUG:
+            #     one_ppl = torch.exp(torch.tensor((loss_w + loss_a) / (ids.shape[1] - 1)))
+            #     logging.info(f"Single sentence PPL: {one_ppl.item()}")
             # breakpoint()
         test_loss_w_sum = np.sum(test_losses_w)
         test_loss_a_sum = np.sum(test_losses_a)
@@ -162,7 +168,7 @@ def eval_joint(model_args: ModelConfig, train_args: TrainConfig, parallel_args: 
         logging.info(f"[Joint] Macro F1: {macro_f1}, Micro F1: {micro_f1}")
 
         # write a file about test loss and step (json)
-        with open(f"./ckpt/{train_args.run_name}/best/test_joint.json", "w") as f:
+        with open(f"./ckpt/{script_args.run_name}/best/test_joint.json", "w") as f:
             ddict = {
                 "test_joint_loss": test_loss,
                 "test_word_loss": test_loss_w,
@@ -186,7 +192,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(f"./ckpt/{train_args.run_name}/epoch_3/test_joint.log"),
+            logging.FileHandler(f"./ckpt/{script_args.run_name}/best/test_joint.log"),
             logging.StreamHandler()
         ]
     )

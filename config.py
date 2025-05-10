@@ -38,9 +38,9 @@ class DebugParallelConfig:
 
 @dataclass
 class TrainConfig:
-    run_name = "push_bllip_con_test_gas1"
+    run_name = "push_bllip_con_test_gas1_42"
     
-    seed: int = 12345
+    seed: int = 42
     proposed_batch_size: int = 64 # 64?
     num_workers: int = 4
     epochs: int = 4 # debug: 50, normal: 4
@@ -66,7 +66,7 @@ class TrainConfig:
     batch_size: int = proposed_batch_size // gradient_accumulation_steps
     warmup_steps: int = proposed_warmup_steps * gradient_accumulation_steps
     
-    
+    batch_level = False # if True, then loss/=sum_of_lengths so every batch has the same weight, instead of tokens
     # DEBUG
 @dataclass
 class DebugTrainConfig:

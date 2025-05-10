@@ -870,7 +870,11 @@ class PushdownTransformerConstituency(nn.Module):
         # target = target.contiguous()
         loss_words = F.cross_entropy(logits.reshape(-1, self.vocab_size), target.reshape(-1), ignore_index=self.pad_id, reduction='sum')
         # loss = loss_words + loss_attach
-        
+        # for i in range(qlen):
+        #     # logging attach_logits[:, i, :]
+        #     logging.info(f"step {i}")
+        #     logging.info(attach_logits[:,i,:])
+        #     logging.info(logits[i,:,:])
         if return_h:
             return loss_words, loss_attach, core_out
         elif return_decoded_attach:
@@ -896,6 +900,8 @@ class PushdownTransformerConstituency(nn.Module):
         # src = ids.transpose(0, 1)[:step+1]
         # tgt = ids.transpose(0, 1)[step+1]
         self.eval()
+        if isinstance(step, torch.Tensor):
+            step = step[0].item()
         src, next_tgt, tgt = ids.transpose(0, 1)[:step], ids.transpose(0, 1)[step], ids.transpose(0, 1)[1:step+1]
         # src = ids.transpose(0, 1)[:step] # shape [step, bsz]
         
@@ -905,9 +911,9 @@ class PushdownTransformerConstituency(nn.Module):
         pos_emb = self.pos_emb(pos_seq)
         dec_attn_mask = torch.triu(
             word_emb.new_ones(src.size(0), src.size(0)), diagonal=1).bool()[:,:,None]
-        # core_out = self.dropout(word_emb) # NOTE: BECAUSE IN EVAL MODE
-        # pos_emb = self.dropout(pos_emb)
-        core_out = word_emb # shape [T, B, d_model]
+        core_out = self.dropout(word_emb) # NOTE: BECAUSE IN EVAL MODE
+        pos_emb = self.dropout(pos_emb)
+        # core_out = word_emb # shape [T, B, d_model]
         for layer in self.layers:
             core_out = layer.forward(core_out, pos_emb, self.r_w_bias,
                     self.r_r_bias, stack_tape, attn_mask=dec_attn_mask, mems=None)
@@ -927,13 +933,15 @@ class PushdownTransformerConstituency(nn.Module):
         logits_next_attach = attach_logits[:, -1, :].squeeze(1) # shape [B, T+1]
 
         # postprocess logits_next_attach
+        # list of set
         for batch_idx, reduced_set in enumerate(list_reduced):
             for reduced_pos in reduced_set:
                 logits_next_attach[batch_idx, reduced_pos] = float('-inf')
-        
+        # logging.info(f"step {step}")
+        # logging.info(logits_next_attach)
+        # logging.info(logits_next_word)
         logits_next_attach = F.log_softmax(logits_next_attach, dim=-1)
-        # breakpoint()
         # logprobs_next_word_tgt: the log prob of the next word (exactly that word, not a prob distribution), in a batch
         # logits_next_attach: the log probS of the next attachment (which IS a prob distribution so we want to SELECT on this), in a batch
+        
         return logprobs_next_word_tgt, logits_next_attach
-    
