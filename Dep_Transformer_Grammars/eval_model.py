@@ -301,6 +301,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     infer_num = 0
     label_num = 0
     crit = nn.BCELoss(reduction="none")
+    len_loss_dict = {}
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -396,6 +397,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             # left_logits, right_logits = left_logits.squeeze(), right_logits.squeeze()
                             # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
                             sent_biaffine_loss = crit(scores, labels).sum()
+                            # infer_score = biaffine_model.inference(input1[0,:3].unsqueeze(0), sent_attn_relpos[:, 2,:3].unsqueeze(1))
                             # sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
                             
                             # output logits and label
@@ -469,6 +471,12 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                     logger.info(f"ori ppl {ori_ppl:.4f}")
             else:
                 total_loss_with_biaffine += ret.sum().item()   
+                for idx, length_idx in enumerate([len(sent) - 1 for sent in sents]):
+                    if length_idx in len_loss_dict:
+                        len_loss_dict[length_idx].append(ret[idx].item())
+                    else:
+                        len_loss_dict[length_idx] = [ret[idx].item()]
+                
     
     ppl = np.exp(total_loss / num_words) 
     ppl_biaffine = np.exp(total_loss_with_biaffine / num_words)     
@@ -503,6 +511,11 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             else:
                 f_1 = 2 * pre * recall / (pre + recall)
         logger.info(f"pre {pre:.4f}, rec {recall:.4f}, F1 {f_1:.4f}")
+
+        # sorted_keys = sorted(len_loss_dict.keys())
+        # for key in sorted_keys:
+        #     avg_loss = np.mean(len_loss_dict[key])
+        #     logger.info(f"avg loss for len {key}: {avg_loss:.4f}")
 
     model.train()
     return ppl, uas

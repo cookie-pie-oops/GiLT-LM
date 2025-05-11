@@ -338,6 +338,7 @@ class BiaffineAttention(nn.Module):
         self.f_1 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)  #3072->3072->2048
         self.f_3 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)
         self.b_1 = nn.Parameter(torch.rand(input_dim + 1, input_dim + 1))
+        self.b_2 = nn.Parameter(torch.rand(input_dim, input_dim))
 
         self.f_2 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)  #2048->2048->1024
         self.f_4 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)
@@ -352,6 +353,9 @@ class BiaffineAttention(nn.Module):
             self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 3))
             self.softmax = nn.Sigmoid()
             nn.init.xavier_uniform_(self.root_representation)
+        
+        self.arc_softmax = nn.Softmax(dim=-1)
+        self.prob = nn.Linear(input_dim, 30)
         
     def forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
         batchsize = hidden.shape[0]
@@ -387,13 +391,25 @@ class BiaffineAttention(nn.Module):
         child_position_info = self.pos_to_child_k(child_position)
         parent_hidden = parent_hidden + parent_pos_info + embed_biases_parent
         child_hidden = child_hidden + child_position_info + embed_biases_child
+        # parent_hidden = torch.cat((parent_hidden + parent_pos_info, embed_biases_parent), dim=-1)
+        # child_hidden = torch.cat((child_hidden + child_position_info, embed_biases_child), dim=-1)
 
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
         scores = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+
+        # square = (parent_hidden * child_hidden).clone()
+        square = torch.einsum('bijn,nn,bijn->bijn', parent_hidden, self.b_2, child_hidden)
+        arc_num_scores = torch.zeros((batchsize, time_step, 1024)).to(device=hidden.device)
+        for step in range(time_step):
+            scale = (step + 1) * 2
+            arc_num_scores[:, step, :] = square[:, :(step+1), :(step+2)].sum(dim=(-2,-3)) / np.sqrt(scale) #np.sqrt(scale)
+            square[:, :(step+1), :(step+2)] = 0
+        arc_num_logits = self.prob(arc_num_scores)
+        arc_num_prob = self.arc_softmax(arc_num_logits)
         scores = self.softmax(scores)
-        return scores
+        return scores, arc_num_prob, arc_num_logits
     
     def set_temperature(self, value):
         self.temperature = value
@@ -410,7 +426,7 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_1(hidden)
 
         step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
-        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (1,0))
+        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (0,1))
         step_attn_relpos = F.pad(step_attn_relpos, (0,1))
         embed_tuple_parent = [self.depth_embed[i](step_attn_relpos[i]) for i in range(len(step_attn_relpos))]
         embed_tuple_child = [self.depth_embed[i](child_relpos[i]) for i in range(len(child_relpos))]
@@ -431,6 +447,40 @@ class BiaffineAttention(nn.Module):
         child_hidden = self.f_4(child_hidden)
 
         scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        scores = self.softmax(scores)
+        arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2, child_hidden)
+        # arc_num_scores = torch.einsum('bin, bjn->bijn', parent_hidden, child_hidden)
+        arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
+        arc_num_logits = self.prob(arc_num_scores)
+        arc_num_prob = self.arc_softmax(arc_num_logits)
+        return scores, arc_num_prob, arc_num_logits
+
+    def inference2(self, hidden, step_attn_relpos):
+        batchsize = hidden.shape[0]
+        child_hidden = self.f_3(hidden)
+        if self.type == "Multi":
+            repeat_shape = list(hidden.shape)
+            repeat_shape[-1] = 1
+            repeat_shape[-2] = 1
+            root_tokens = self.root_representation.repeat(*repeat_shape)
+            hidden = torch.cat((root_tokens, hidden), dim=hidden.dim() - 2)
+        parent_hidden = self.f_1(hidden)
+
+        step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
+        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (0,1))
+        step_attn_relpos = F.pad(step_attn_relpos, (0,1))
+        embed_tuple_parent = [self.depth_embed[i](step_attn_relpos[i]) for i in range(len(step_attn_relpos))]
+        embed_biases_parent = torch.cat(embed_tuple_parent, dim=-1)
+        embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
+
+        parent_position = torch.arange(child_hidden.size(1), -1, -1.0, device=hidden.device).long()
+        parent_position = self.pos_emb(parent_position).permute(1, 0, 2).repeat(batchsize, 1, 1)
+        parent_position_info = self.pos_to_parent_k(parent_position)
+        parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
+
+        parent_hidden = self.f_2(parent_hidden)
+        child_hidden = self.f_4(child_hidden)
+        scores = torch.einsum('bjd,ddh,bid->bjh', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
         scores = self.softmax(scores)
         return scores
 
@@ -564,7 +614,11 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # embed_len = kwargs.pop('embed_len', None)
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.embed_k_net = nn.ModuleList([torch.nn.Linear(256, self.d_model) for i in range(4)])
+        self.embed_k_net = nn.ModuleList([torch.nn.Linear(256, 1024) for i in range(4)])
+        # self.content_rel_embed = nn.ModuleList([torch.nn.Embedding(151, self.d_head),
+        #     torch.nn.Embedding(151, self.d_head),
+        #     torch.nn.Embedding(151, self.d_head),
+        #     torch.nn.Embedding(151, self.d_head)])
         # if embed_len[0] is not None:
         # self.rel_embed = nn.ModuleList([torch.nn.Embedding(151, 1024),
         #     torch.nn.Embedding(151, 1024),
@@ -600,12 +654,14 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 # print(w.shape)
                 w_heads = self.qkv_net(w)
             r_head_k = self.r_net(r)
+            # content_rel_embed = self.content_rel_embed
             if content_rel_embed is not None:
                 r2 = torch.arange(max_len - min_len, -1, -1.0, device=w.device).long()
                 W_k = self.qkv_net[0].weight[self.d_model:2 * self.d_model, :]
                 # R_k = self.r_net.weight
                 biases = [rel_embed(r2) for rel_embed in content_rel_embed]
                 biases = [self.embed_k_net[i](biases[i]) for i in range(4)]
+                # biases = [self.embed_k_net[i](biases[i]).repeat(1, self.n_head) for i in range(4)]
                 rel_wk = [(bias@W_k.T).view(max_len - min_len + 1, self.n_head, self.d_head) for bias in biases]
                 # if attn_relpos.dim() == 4:
                 #     # content_rel_embed, pos_rel_embed = content_rel_embed

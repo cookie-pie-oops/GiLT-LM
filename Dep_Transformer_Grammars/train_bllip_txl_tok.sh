@@ -7,9 +7,9 @@ python train_dep.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
     --dev_file ../data_process/token_level/BLLIP_LG_DEV_SPM_TOK.csv \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --log_file logs/log_large_tok_txl_seed_4.txt \
+    --log_file logs/log_large_tok_txl_seed_4_3.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/large_tok_txl_seed_4.pt \
+    --save_path models/large_tok_txl_seed_4_3.pt \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
     --attn_mask None \
@@ -22,7 +22,7 @@ python train_dep.py \
     --num_layers 16 \
     --max_relative_length 62 \
     --min_relative_length -1 \
-    --seed 12345 \
+    --seed 123456 \
     --weight_decay 0 \
     --max_grad_norm 3.0 \
     --num_epochs 4 \
