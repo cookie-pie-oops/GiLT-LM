@@ -41,6 +41,7 @@ if __name__ == "__main__":
     vocab_size, pad, bos, eos, startofword_id, vocab = load_vocab('../data_process/spm_parsing/BLLIP_spm.vocab')
     torch.manual_seed(123456)
     np.random.seed(123456)
+    random.seed(12345)
     original = []
     subtoken_begins = []
     original_length = []
@@ -54,13 +55,13 @@ if __name__ == "__main__":
     logger.info("Score beam size: {}".format(scorebeamsize))
     checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
-    biaffine_model = checkpoint['biaffine_model']
+    # biaffine_model = checkpoint['biaffine_model']
     model.eval()
-    biaffine_model.eval()
+    # biaffine_model.eval()
     model.to(device)
-    biaffine_model.to(device)
+    # biaffine_model.to(device)
 
-    biaffine_model.set_temperature(1.0)
+    # biaffine_model.set_temperature(1.0)
     
     sp = spm.SentencePieceProcessor(model_file='../data_process/spm_parsing/BLLIP_spm.model')
     file_list = os.listdir("/home/huangty/BLiMP_data/json/.")
@@ -69,7 +70,10 @@ if __name__ == "__main__":
         with open("/home/huangty/BLiMP_data/json/" + file, 'r') as f:
             data = f.readlines()
             sample_list = [json.loads(ds.strip()) for ds in data]
-        sample_list = random.sample(sample_list, int(len(sample_list) / 10))
+        sample_num = (len(sample_list) - 1) // 10 + 1
+        sample_index = [x * 10 for x in range(sample_num)]
+        sample_list = [sample_list[i] for i in sample_index]
+        # sample_list = random.sample(sample_list, int(len(sample_list) / 10))
         logger.info(file[:-6])
         acc = 0.0
         for idx in tqdm(range(len(sample_list))):
@@ -92,13 +96,13 @@ if __name__ == "__main__":
                         count_num += 1
                     sent_index_to_id.append(count_num)
                 
-                scores, _ = update_beam(encoded, model, biaffine_model, start_predict_new_word, 
-                    sent_index_to_id, beamsize, scorebeamsize, device, logger)
-                # _, prob = model([encoded[:-1]], None, None, use_mask=None)
-                # prob = prob.log_softmax(-2)
-                # scores = [-prob[i, encoded[i + 1]].item() for i in range(len(encoded[1:]))]
-                # scores.insert(0, 0)
-                # scores = list(itertools.accumulate(scores))   
+                # scores, _ = update_beam(encoded, model, biaffine_model, start_predict_new_word, 
+                #     sent_index_to_id, beamsize, scorebeamsize, device, logger)
+                _, prob = model([encoded[:-1]], None, None, use_mask=None)
+                prob = prob.log_softmax(-2)
+                scores = [-prob[i, encoded[i + 1]].item() for i in range(len(encoded[1:]))]
+                scores.insert(0, 0)
+                scores = list(itertools.accumulate(scores))   
 
                 phen2surprisals[phen] = scores[-1]
             

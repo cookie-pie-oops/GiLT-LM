@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH -t 5-00:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=2
 #SBATCH -G 1
 #SBATCH --output=finetune_txl_STS_1.out
 
 # eval interval: sst2 50, mrpc 10, rte 20
-export fix_lr=1e-5  # sst2 1e-5, 3e-6
+export fix_lr=3e-6  # sst2 1e-5, 3e-6
 export epoch=45  # sst2 5, mrpc 15, rte 5
 export dataset=STS
 export finetune_set=sts
-export eval_interval=10
+export eval_interval=100
 export random_seed=1234   # 1234, 12345, 123456
 # baseLM
 python train_dep.py \
@@ -23,12 +23,13 @@ python train_dep.py \
     --sts_train_path ../data_process/STS/STS_TRAIN_score.txt \
     --sts_dev_path ../data_process/STS/STS_DEV_score.txt \
     --sts_test_path ../data_process/STS/STS_TEST_score.txt \
+    --write_test_output ../data_process/$dataset/$dataset\_TEST_pred.tsv \
     --finetune $finetune_set \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
     --attn_mask None \
     --gpu 0 \
-    --batch_size 256 \
+    --batch_size 128 \
     --w_dim 1024 \
     --n_head 8 \
     --d_head 128 \
@@ -51,7 +52,7 @@ python train_dep.py \
     --dropoutatt 0 \
     --eval_interval $eval_interval \
     --eval_batch_size 8 \
-    --log_every 5 \
+    --log_every 10 \
     --min_lr $fix_lr \
     --decay_interval 8 \
 

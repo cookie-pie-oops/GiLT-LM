@@ -54,6 +54,10 @@ if __name__ == "__main__":
     logger.info("Model path: {}".format(model_path))
     logger.info("Beam size: {}".format(beamsize))
     logger.info("Score beam size: {}".format(scorebeamsize))
+    logger.info(f"parse: {args.parse}")
+    if args.parse:
+        logger.info(f"parse file: {args.parse_file}")
+        fw = open(args.parse_file, 'w')
     checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
     biaffine_model = checkpoint['biaffine_model']
@@ -75,10 +79,10 @@ if __name__ == "__main__":
         if args.parse:
             best_graph = get_best_graph(beam_with_graph)
             arrow_dict = get_action_from_graph(best_graph)
-            with open(args.parse_file, 'a') as f:
-                f.write(json.dumps(arrow_dict, ensure_ascii=False)+'\n')
+            fw.write(json.dumps(arrow_dict, ensure_ascii=False)+'\n')
         total_ppl += scores[-1]
         total_len += len(encoded) - 1
         logger.info(f"sentence {idx + 1} ppl: {np.exp(scores[-1] / (len(encoded) - 1))}")
+        logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
     
     logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")

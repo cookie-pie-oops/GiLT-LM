@@ -210,5 +210,8 @@ if __name__ == "__main__":
         type_acc.setdefault(suite_type, []).append(acc / len(test_suite_parser.answers))
     
     logger.info(f"final correct rate: {np.mean(final_acc)}\n")
+    SG_Score = 0.0
     for key, value in type_acc.items():
         logger.info(f"{key}: {np.mean(value)}")
+        SG_Score += np.mean(value)
+    logger.info(f"SG Score: {SG_Score / len(type_acc)}")

@@ -323,7 +323,7 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                     graph_scores[step, :(temp_row), :(temp_row - 1)] = -1
                     temp_scores = graph_scores[step, :(temp_row+1), :(temp_row)]
                     sorted_scores, sorted_indices = torch.sort(temp_scores.flatten(), descending=True)
-                    threshold = sorted_scores[min(scorebeamsize, len(sorted_scores)) - 1]
+                    threshold = torch.topk(arc_num_prob[step], scorebeamsize)[0][-1]
                     rows = sorted_indices // temp_row
                     cols = sorted_indices % temp_row
                     # next_candidates = []
@@ -428,7 +428,7 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
             # logger.info("One beam time: {}".format(one_beam_end - one_beam_start))
             next_arcbeam.sort(key=lambda x: -x[0])
             next_arcbeam = next_arcbeam[:beamsize]
-            step_score = -np.log(np.exp(temp_score).sum())
+            step_score = -(np.max(temp_score) + np.log(np.sum(np.exp(temp_score - np.max(temp_score)))))
             scores.append(step_score)
             arcbeam = next_arcbeam
             # logger.info("one step time: {}".format(time.time() - start_time))

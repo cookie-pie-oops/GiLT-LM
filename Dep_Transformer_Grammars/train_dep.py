@@ -3,6 +3,7 @@ import torch
 import argparse
 import os
 import sys
+import csv
 import torch.nn as nn
 import logging
 import time
@@ -69,6 +70,7 @@ parser.add_argument('--finetune', default=None, type=str)
 parser.add_argument('--sts_train_path', default=None)
 parser.add_argument('--sts_dev_path', default=None)
 parser.add_argument('--sts_test_path', default=None)
+parser.add_argument('--write_test_output', default=None)
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -189,7 +191,7 @@ def weights_init(m):
             fan_in = nn.init._calculate_correct_fan(m.r_r_bias, 'fan_in')
             nn.init.trunc_normal_(m.r_r_bias, 0.0, np.sqrt(1.0 / fan_in))
 
-def eval(data, startofword, model, length, args = None, score = None):
+def eval(data, startofword, model, length, args = None, score = None, write_test_output = None):
     model.eval()
     num_sents = 0
     total_loss = 0.0
@@ -201,6 +203,9 @@ def eval(data, startofword, model, length, args = None, score = None):
     label = 0
     prediction = []
     score_label = []
+    if write_test_output is not None:
+        head_data = [["index", "prediction"]]
+        count = 0
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -218,9 +223,19 @@ def eval(data, startofword, model, length, args = None, score = None):
                     if sents[j][idx + 1] == 2060:   # 0
                         if prob[idx][2056][j] < prob[idx][2060][j]:
                             microf1 += 1
+                            head_data.append([count, 0])
+                            count += 1
+                        else:
+                            head_data.append([count, 1])
+                            count += 1
                     elif sents[j][idx + 1] == 2056:  # 1
                         if prob[idx][2056][j] > prob[idx][2060][j]:
                             microf1 += 1
+                            head_data.append([count, 1])
+                            count += 1
+                        else:
+                            head_data.append([count, 0])
+                            count += 1
 
             if args.finetune == "mrpc":
                 # 2745,11346,5599 -> 2064: equivalent 72 + 8864: inequivalent
@@ -231,8 +246,12 @@ def eval(data, startofword, model, length, args = None, score = None):
                         if prob[idx][2064][j] < prob[idx][72][j]:
                         # if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
                             microf1 += 1
+                            head_data.append([count, 0])
+                            count += 1
                         else:
                             infer += 1
+                            head_data.append([count, 1])
+                            count += 1
                     elif sents[j][idx + 1] == 2064:  # 1
                         label += 1
                         if prob[idx][2064][j] > prob[idx][72][j]:
@@ -240,6 +259,11 @@ def eval(data, startofword, model, length, args = None, score = None):
                             pre += 1
                             infer += 1
                             microf1 += 1
+                            head_data.append([count, 1])
+                            count += 1
+                        else:
+                            head_data.append([count, 0])
+                            count += 1
             
             if args.finetune == "rte":
                 # 2745,11346,5599 -> 221: 1 60: 0
@@ -249,18 +273,36 @@ def eval(data, startofword, model, length, args = None, score = None):
                     if sents[j][idx + 1] == 60:   # 0
                         if prob[idx][221][j] < prob[idx][60][j]:
                             microf1 += 1
+                            head_data.append([count, "not_entailment"])
+                            count += 1
+                        else:
+                            head_data.append([count, "entailment"])
+                            count += 1
                     elif sents[j][idx + 1] == 221:  # 1
                         if prob[idx][221][j] > prob[idx][60][j]:
                             microf1 += 1
+                            head_data.append([count, "entailment"])
+                            count += 1
+                        else:
+                            head_data.append([count, "not_entailment"])
+                            count += 1
 
             if args.finetune == "sts":
-                prediction.extend(ret.cpu().tolist())
+                out = ret.cpu().tolist()
+                prediction.extend(out)
                 score_label.extend(score[i])
+                for idx in range(len(sents)):
+                    head_data.append([count, f"{out[idx].item()}:.3f"])
+                    count += 1
 
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
 
+    if write_test_output is not None:
+        fw = open(write_test_output, 'w')
+        writer = csv.writer(fw, delimiter="\t")
+        writer.writerows(head_data)
     logger = get_logger()
     model.train()
     if args.finetune is None:
@@ -392,14 +434,16 @@ def main(args):
 
     if args.finetune == "sts":
         model.STS = nn.Linear(args.w_dim, 1)
-        # optimizer = torch.optim.AdamW(model.STS.parameters(), lr=1e-5)
+        nn.init.xavier_uniform_(model.STS.weight)
+        nn.init.zeros_(model.STS.bias)
         old_optimizer_dict = checkpoint['optimizer']
         old_state = old_optimizer_dict['state']
         old_param_groups = old_optimizer_dict['param_groups']
-        nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
-        emb_params = list(model.emb.parameters())
-        param_list = [nonemb_params, emb_params]
-        lr_list = [1, args.emb_lr_multiplier]
+        transformer_params = [p for p in model.parameters() if p.size() != (1, args.w_dim) and p.size() != (1,)]
+        linear_params = list(model.STS.parameters())
+        param_list = [transformer_params, linear_params]
+        lr_list = [1, 1]
+        # optimizer = torch.optim.AdamW([{'params':model.STS.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
         optimizer = torch.optim.AdamW([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
         new_param_groups = optimizer.param_groups
 
@@ -510,9 +554,8 @@ def main(args):
                                 }
                     torch.save(checkpoint, args.save_path) 
                     # model.cuda()
-                    if args.finetune != "sts" and args.finetune != "rte":
-                        test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args)
-                        logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
+                    test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args, write_test_output=args.write_test_output)
+                    logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
                 elif args.scheduler == 'decay':
                     remaining_epoch += 1
                     if remaining_epoch >= args.decay_interval:

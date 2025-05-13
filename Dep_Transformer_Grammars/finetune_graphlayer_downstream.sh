@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -t 5-00:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=2
 #SBATCH -G 1
 #SBATCH --output=finetune_psd_MRPC.out
 
@@ -12,18 +12,19 @@ export finetune_set=rte
 export eval_interval=20
 export DATASIZE=large
 export RELTYPE=mixing
-export LOSSRATIO=0.8    # we won't finetune pointer
+export LOSSRATIO=0.2    # we won't finetune pointer
 # baseLM
 python train_graphLayer.py \
     --train_file  ../data_process/$dataset/$dataset\_TRAIN_token.txt \
     --dev_file ../data_process/$dataset/$dataset\_DEV_token.txt \
     --test_file ../data_process/$dataset/$dataset\_TEST_token.txt \
-    --train_arrow_file ../data_process/$dataset/$dataset\_TRAIN_psd_multiarrow_2.txt \
-    --dev_arrow_file ../data_process/$dataset/$dataset\_DEV_psd_multiarrow_2.txt \
-    --test_arrow_file ../data_process/$dataset/$dataset\_TEST_psd_multiarrow_2.txt \
+    --train_arrow_file ../data_process/$dataset/$dataset\_TRAIN_psd_multiarrow_parse_2.txt \
+    --dev_arrow_file ../data_process/$dataset/$dataset\_DEV_psd_multiarrow_parse_2.txt \
+    --test_arrow_file ../data_process/$dataset/$dataset\_TEST_psd_multiarrow_parse_2.txt \
+    --write_test_output ../data_process/$dataset/$dataset\_TEST_pred.tsv \
     --log_file logs/finetune_psd_graphlayer_$finetune_set.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_psd_4_1:0.2_mixing_ACE_predict_ahead_graph_rel_split_5.pt \
+    --model_file models/graphlayer_small_psd_4_1:0.2_mixing_ACE_predict_ahead_graph_rel_split_actionnum_head.pt \
     --save_path models/finetune_psd_graphlayer_$finetune_set.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
@@ -60,8 +61,8 @@ python train_graphLayer.py \
     --dropout 0.0 \
     --dropoutatt 0 \
     --eval_interval $eval_interval \
-    --eval_batch_size 32 \
-    --log_every 1 \
+    --eval_batch_size 8 \
+    --log_every 10 \
     --min_lr $fix_lr \
     --decay_interval 8 \
 
