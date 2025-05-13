@@ -16,6 +16,7 @@ verbose = True
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
+parser.add_argument("--max_stack_depth", type=int, default=150)
 script_args = parser.parse_args()
 
 class TestSuiteParser:
@@ -117,7 +118,7 @@ def eval_sg(model_args: ModelConfig,
         eos_id=model_args.eos_id,
         stack_pad_id=model_args.stack_pad_id,
         pre_lnorm=model_args.pre_lnorm,
-        max_stack_depth=model_args.max_stack_depth
+        max_stack_depth=script_args.max_stack_depth,
     ).to(device)
     
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
@@ -167,7 +168,7 @@ def eval_sg(model_args: ModelConfig,
     # ---------- 2. Loading test data ----------
 
     file_list = os.listdir("test_suites/json/.")
-    final_acc = []
+    # final_acc = []
     final_acc_per_type = {}
     logging.info("# of tests: {}".format(len(file_list)))
     for ii, file in enumerate(file_list):
@@ -241,28 +242,34 @@ def eval_sg(model_args: ModelConfig,
             if not math.isnan(answer):
                 acc += answer
                 if verbose:
-                    logging.info(f"Example {sample_idx}/{len(test_suite_parser.meta_data["data"])}: {examples} -> [{extracted_formula}] == {answer}")
+                    logging.info(f"Example {sample_idx}/{len(test_suite_parser.meta_data['data'])}: {examples} -> [{extracted_formula}] == {answer}")
                     logging.info(f"True/All: {acc}/{sample_idx + 1}")
             else:
                 logging.error(f"Invalid formula: {extracted_formula}")
                 raise ValueError(f"Invalid formula: {extracted_formula}")
         
         acc /= len(test_suite_parser.answers) if len(test_suite_parser.answers) > 0 else 0.
-        final_acc.append(acc)
+        # final_acc.append(acc)
         if suite_type not in final_acc_per_type:
             final_acc_per_type[suite_type] = [acc]
         else:
             final_acc_per_type[suite_type].append(acc)
         logging.info(f"Accuracy for {file[:-5]}: {acc}")
     logging.info("=" * 100)
-    logging.info(f"[Syntactic Generalization] Final accuracy: {sum(final_acc) / len(final_acc)}")
+    # logging.info(f" Final accuracy: {sum(final_acc) / len(final_acc)}")
     for suite_type, acc_list in final_acc_per_type.items():
         logging.info(f"Accuracy for {suite_type}: {sum(acc_list) / len(acc_list)}")
     logging.info("=" * 100)
     
     # also add the sg to json
-    final_acc_per_type["overall"] = sum(final_acc) / len(final_acc)
-    final_acc_per_type["unreduced"] = final_acc
+    # final_acc_per_type["overall"] = sum(final_acc) / len(final_acc)
+    # final_acc_per_type["unreduced"] = final_acc
+    # over suite types
+    avg_by_suite_type = []
+    for suite_type, acc_list in final_acc_per_type.items():
+        avg_by_suite_type.append(sum(acc_list) / len(acc_list))
+    final_acc_per_type["overall"] = sum(avg_by_suite_type) / len(avg_by_suite_type)
+    logging.info(f"[Syntactic Generalization] Overall accuracy: {final_acc_per_type['overall']}")
     out_path = f"./ckpt/{script_args.run_name}/best/test_sg.json"
     with open(out_path, "w") as f:
         json.dump(final_acc_per_type, f, indent=4)

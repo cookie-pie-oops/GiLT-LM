@@ -16,6 +16,7 @@ verbose = False
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
+parser.add_argument("--max_stack_depth", type=int, default=150)
 script_args = parser.parse_args()
 
 class TestSuiteParser:
@@ -117,7 +118,7 @@ def eval_blimp(model_args: ModelConfig,
         eos_id=model_args.eos_id,
         stack_pad_id=model_args.stack_pad_id,
         pre_lnorm=model_args.pre_lnorm,
-        max_stack_depth=model_args.max_stack_depth
+        max_stack_depth=script_args.max_stack_depth,
     ).to(device)
     
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
@@ -175,7 +176,10 @@ def eval_blimp(model_args: ModelConfig,
         with open("blimp/json/{}".format(file), "r") as f:
             data = f.readlines() # jsonl file
             sample_list = [json.loads(ds.strip()) for ds in data]
-        sample_list = random.sample(sample_list, int(len(sample_list) / 10)) # load 1/10 of the data randomly
+        # sample_list = random.sample(sample_list, int(len(sample_list) / 10)) # load 1/10 of the data randomly
+        sample_num = (len(sample_list) - 1) // 10 + 1
+        sample_index = [x*10 for x in range(sample_num)]
+        sample_list = [sample_list[i] for i in sample_index]
         
         # ---------- 3. Beam Search ----------
         pbar = tqdm(total=len(sample_list), desc="file: {}".format(file[:-6]), disable=verbose)
@@ -206,7 +210,7 @@ def eval_blimp(model_args: ModelConfig,
                 acc += answer
                 if verbose:
                     logging.info(f"Example {sample_idx}/{len(sample_list)}: \"{examples['sentence_good']}\" vs \"{examples['sentence_bad']}\"")
-                    logging.info(f"Surprisal: {phen2surprisals['sentence_good']} < {phen2surprisals['sentence_bad']} ? -> {"True" if answer == 1 else "False"}")
+                    logging.info(f"Surprisal: {phen2surprisals['sentence_good']} < {phen2surprisals['sentence_bad']} ? -> {'True' if answer == 1 else 'False'}")
                     logging.info(f"True/All: {acc}/{sample_idx + 1}")
             else:
                 logging.error(f"Surprisal is NaN for example {sample_idx}/{len(sample_list)}")
@@ -218,7 +222,7 @@ def eval_blimp(model_args: ModelConfig,
         logging.info(f"Accuracy for {file[:-6]}: {acc}")
         logging.info(f"Mean running macro accuracy: {sum(final_acc) / len(final_acc)}")
     logging.info("=" * 100)
-    logging.info(f"[Syntactic Generalization] Final macro accuracy: {sum(final_acc) / len(final_acc)}")
+    logging.info(f"[BLiMP] Final macro accuracy: {sum(final_acc) / len(final_acc)}")
     logging.info("=" * 100)
     
     # also add the sg to json

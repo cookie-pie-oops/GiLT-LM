@@ -159,7 +159,7 @@ class BeamSearchDepthBased:
             for i, beam_obj in enumerate(beam_curr):
                 eos_attach_score = scores_attach_time[i][0].item()
                 # logging.info(f"EOS attach score: {eos_attach_score}")
-                # eos_attach_score = 0
+                # eos_attach_score = 0 # DEBUG, COMMENT THIS
                 new_score = beam_obj.score + scores_word[i].item() + eos_attach_score
                 new_attachment_decisions = beam_obj.attachment_decisions + [0]
                 new_beam_obj = BeamObj(new_score, 

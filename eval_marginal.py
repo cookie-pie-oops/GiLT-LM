@@ -14,6 +14,7 @@ DEBUG = False
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
+parser.add_argument("--max_stack_depth", type=int, default=150)
 script_args = parser.parse_args()
 @torch.inference_mode()
 def eval_marginal(model_args: ModelConfig,
@@ -70,7 +71,7 @@ def eval_marginal(model_args: ModelConfig,
         eos_id=model_args.eos_id,
         stack_pad_id=model_args.stack_pad_id,
         pre_lnorm=model_args.pre_lnorm,
-        max_stack_depth=model_args.max_stack_depth
+        max_stack_depth=script_args.max_stack_depth,
     ).to(device)
 
     if parallel_args.parallel == "dp" and torch.cuda.device_count() > 1:
