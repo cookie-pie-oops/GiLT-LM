@@ -12,7 +12,7 @@ from beam_search_utils import BeamSearchDepthBased
 import random
 import gc
 from utils import get_suite_type, eval_math_expr
-verbose = False
+verbose = True
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
