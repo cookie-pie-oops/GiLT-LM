@@ -70,9 +70,9 @@ if __name__ == "__main__":
         with open("/home/huangty/BLiMP_data/json/" + file, 'r') as f:
             data = f.readlines()
             sample_list = [json.loads(ds.strip()) for ds in data]
-        sample_num = (len(sample_list) - 1) // 10 + 1
-        sample_index = [x * 10 for x in range(sample_num)]
-        sample_list = [sample_list[i] for i in sample_index]
+        # sample_num = (len(sample_list) - 1) // 10 + 1
+        # sample_index = [x * 10 for x in range(sample_num)]
+        # sample_list = [sample_list[i] for i in sample_index]
         # sample_list = random.sample(sample_list, int(len(sample_list) / 10))
         logger.info(file[:-6])
         acc = 0.0
@@ -104,7 +104,7 @@ if __name__ == "__main__":
                 scores.insert(0, 0)
                 scores = list(itertools.accumulate(scores))   
 
-                phen2surprisals[phen] = scores[-1]
+                phen2surprisals[phen] = scores[-2]
             
             if phen2surprisals["sentence_good"] < phen2surprisals["sentence_bad"]:
                 acc += 1

@@ -223,19 +223,23 @@ def eval(data, startofword, model, length, args = None, score = None, write_test
                     if sents[j][idx + 1] == 2060:   # 0
                         if prob[idx][2056][j] < prob[idx][2060][j]:
                             microf1 += 1
-                            head_data.append([count, 0])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
                         else:
-                            head_data.append([count, 1])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                     elif sents[j][idx + 1] == 2056:  # 1
                         if prob[idx][2056][j] > prob[idx][2060][j]:
                             microf1 += 1
-                            head_data.append([count, 1])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                         else:
-                            head_data.append([count, 0])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
 
             if args.finetune == "mrpc":
                 # 2745,11346,5599 -> 2064: equivalent 72 + 8864: inequivalent
@@ -246,12 +250,14 @@ def eval(data, startofword, model, length, args = None, score = None, write_test
                         if prob[idx][2064][j] < prob[idx][72][j]:
                         # if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
                             microf1 += 1
-                            head_data.append([count, 0])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
                         else:
                             infer += 1
-                            head_data.append([count, 1])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                     elif sents[j][idx + 1] == 2064:  # 1
                         label += 1
                         if prob[idx][2064][j] > prob[idx][72][j]:
@@ -259,11 +265,13 @@ def eval(data, startofword, model, length, args = None, score = None, write_test
                             pre += 1
                             infer += 1
                             microf1 += 1
-                            head_data.append([count, 1])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                         else:
-                            head_data.append([count, 0])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
             
             if args.finetune == "rte":
                 # 2745,11346,5599 -> 221: 1 60: 0
@@ -273,27 +281,32 @@ def eval(data, startofword, model, length, args = None, score = None, write_test
                     if sents[j][idx + 1] == 60:   # 0
                         if prob[idx][221][j] < prob[idx][60][j]:
                             microf1 += 1
-                            head_data.append([count, "not_entailment"])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "not_entailment"])
+                                count += 1
                         else:
-                            head_data.append([count, "entailment"])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "entailment"])
+                                count += 1
                     elif sents[j][idx + 1] == 221:  # 1
                         if prob[idx][221][j] > prob[idx][60][j]:
                             microf1 += 1
-                            head_data.append([count, "entailment"])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "entailment"])
+                                count += 1
                         else:
-                            head_data.append([count, "not_entailment"])
-                            count += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "not_entailment"])
+                                count += 1
 
             if args.finetune == "sts":
                 out = ret.cpu().tolist()
                 prediction.extend(out)
                 score_label.extend(score[i])
-                for idx in range(len(sents)):
-                    head_data.append([count, f"{out[idx].item()}:.3f"])
-                    count += 1
+                if write_test_output is not None:
+                    for idx in range(len(sents)):
+                        head_data.append([count, f"{out[idx]:.3f}"])
+                        count += 1
 
             num_words += total_length
             num_sents += batch_size
@@ -554,7 +567,10 @@ def main(args):
                                 }
                     torch.save(checkpoint, args.save_path) 
                     # model.cuda()
-                    test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args, write_test_output=args.write_test_output)
+                    if args.finetune != "sts":
+                        test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args, write_test_output=args.write_test_output)
+                    else:
+                        test_ppl, test_uas = eval(test_data, startofword_test, model, test_length, args=args, score=test_sts_score, write_test_output=args.write_test_output)
                     logger.info(f"test ppl {test_ppl:.4f}, uas {test_uas:.4f}")
                 elif args.scheduler == 'decay':
                     remaining_epoch += 1

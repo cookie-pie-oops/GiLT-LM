@@ -1374,9 +1374,14 @@ class TransformerGrammar(nn.Module):
         hiddens = []
         hiddens.append(core_out)
         for i, layer in enumerate(self.layers):
-            core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
-                attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length,
-                rel_embed = self.rel_embed)
+            if finetune is not None and i <= 11:
+                core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
+                    attn_relpos=None, min_len=min_relative_length, max_len=max_relative_length,
+                    rel_embed=None)
+            else:
+                core_out = layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, attn_mask=attn_mask,
+                    attn_relpos=attn_relpos, min_len=min_relative_length, max_len=max_relative_length,
+                    rel_embed = self.rel_embed)
             hiddens.append(core_out)
             if i < len(self.layers) - 1:
                 core_out = self.dropout(core_out)
@@ -1427,6 +1432,9 @@ class TransformerGrammar(nn.Module):
         # return word_loss
 
         if return_h:
+            if finetune == "sts":
+                STS_output = self.STS(hiddens[-1][[len(sent) - 2 for sent in x], [i for i in range(batch)]])
+                return STS_output, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
             if use_mask == "graphlayer":
                 return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
                 # return loss, hiddens[9] + hiddens[15]

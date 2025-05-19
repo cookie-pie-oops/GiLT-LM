@@ -11,6 +11,8 @@ import json
 from torch import cuda
 from helping_utils.logger import configure_logger, get_logger
 from model_bllip_dep import TransformerGrammar, BiaffineAttention, find_label_idx
+from scipy.stats import pearsonr, spearmanr
+import csv
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--train_file', default='data/train_LG_bllip_action.csv', type=str)
@@ -80,6 +82,10 @@ parser.add_argument('--distance_len', default=344, type=int)
 parser.add_argument('--depth_len', default=168, type=int)
 parser.add_argument('--predepth_len', default=168, type=int)
 parser.add_argument('--finetune', default=None, type=str)
+parser.add_argument('--sts_train_path', default=None)
+parser.add_argument('--sts_dev_path', default=None)
+parser.add_argument('--sts_test_path', default=None)
+parser.add_argument('--write_test_output', default=None)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -141,6 +147,18 @@ def load_multiarrow(path, batchsize=-1, shuffle=False, seed=1111, size="default"
     else:
         return [left_arc_list[i:i+batchsize] for i in range(0, len(left_arc_list), batchsize)], [right_arc_list[i:i+batchsize] for i in range(0, len(right_arc_list), batchsize)]
 
+def load_STS_score(path, batchsize=-1, shuffle=False, seed=1111):
+    with open(path, 'r') as f:
+        scores = [float(line.strip()) for line in f.readlines()]
+        
+    if shuffle:
+        np.random.seed(seed)
+        np.random.shuffle(scores)
+    
+    if batchsize == -1:
+        return [scores]
+    else:
+        return [scores[i:i+batchsize] for i in range(0, len(scores), batchsize)]
 
 def add_to_all(data, vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id):
     
@@ -185,6 +203,10 @@ def add_format(data, index_to_id, finetune):
         format2 = [26858, 5599]
         format1 = [18737, 145, 5599]
         format3 = []
+    elif finetune == "sts":
+        format1 = [18737, 145, 446, 5599]
+        format2 = [18737, 145, 557, 5599]
+        format3 = [60, 102, 4729, 5599]
     else:
         format1 = [18737, 145, 446, 5599]
         format2 = [18737, 145, 557, 5599]
@@ -337,7 +359,7 @@ def argument_alignment(hidden, sents_index_to_id):    # arguments
     return batch_words_input
 
 def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
-        biaffine_model, length, left_arc, right_arc, args = None):
+        biaffine_model, length, left_arc, right_arc, args = None, score = None, write_test_output = None):
     model.eval()
     biaffine_model.eval()
     # right_biaffine_model.eval()
@@ -359,6 +381,11 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     action_num = 0
     topk_infer_num = 0
     topk_acc_num = 0
+    prediction = []
+    score_label = []
+    if write_test_output is not None:
+        head_data = [["index", "prediction"]]
+        count = 0
     with torch.no_grad():
         for i in range(len(data)):
             sents = data[i]
@@ -372,7 +399,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
             
             ret, hidden, word_emb, attn_relpos_for_pointer, prob = model(sents, startofword[i], length[i], args.attn_mask, args.document_level, args.return_h, False, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
-                        sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type)
+                        sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type, finetune=args.finetune)
 
             if args.finetune == "sst2":
                 # 26858,5599 -> 2056: positive 2060: negative
@@ -382,9 +409,23 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                     if sents[j][idx + 1] == 2060:   # 0
                         if prob[idx][2056][j] < prob[idx][2060][j]:
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
+                        else:
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                     elif sents[j][idx + 1] == 2056:  # 1
                         if prob[idx][2056][j] > prob[idx][2060][j]:
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
+                        else:
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
 
             if args.finetune == "mrpc":
                 # 2745,11346,5599 -> 2064: equivalent 72 + 8864: inequivalent
@@ -395,8 +436,14 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                         if prob[idx][2064][j] < prob[idx][72][j]:
                         # if sents[j][idx] == out[idx-1][j].item() and sents[j][idx - 1] == out[idx - 2][j].item():
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
                         else:
                             finetune_infer += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
                     elif sents[j][idx + 1] == 2064:  # 1
                         finetune_label += 1
                         if prob[idx][2064][j] > prob[idx][72][j]:
@@ -404,6 +451,13 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                             finetune_pre += 1
                             finetune_infer += 1
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, 1])
+                                count += 1
+                        else:
+                            if write_test_output is not None:
+                                head_data.append([count, 0])
+                                count += 1
             
             if args.finetune == "rte":
                 # 2745,11346,5599 -> 221: 1 60: 0
@@ -413,118 +467,146 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
                     if sents[j][idx + 1] == 60:   # 0
                         if prob[idx][221][j] < prob[idx][60][j]:
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "not_entailment"])
+                                count += 1
+                        else:
+                            if write_test_output is not None:
+                                head_data.append([count, "entailment"])
+                                count += 1
                     elif sents[j][idx + 1] == 221:  # 1
                         if prob[idx][221][j] > prob[idx][60][j]:
                             finetune_microf1 += 1
+                            if write_test_output is not None:
+                                head_data.append([count, "entailment"])
+                                count += 1
+                        else:
+                            if write_test_output is not None:
+                                head_data.append([count, "not_entailment"])
+                                count += 1
+            if args.finetune == "sts":
+                out = torch.clip(ret, 0, 5).flatten().cpu().tolist()
+                prediction.extend(out)
+                score_label.extend(score[i])
+                if write_test_output is not None:
+                    for idx in range(len(sents)):
+                        head_data.append([count, f"{out[idx]:.3f}"])
+                        count += 1
 
-            hidden = hidden.transpose(0, 1) # non_biaffine
-            word_emb = word_emb.transpose(0, 1)
-            # batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
-            batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
-            if [left_arrow, right_arrow]:
-                for sent_ids, sent_hidden, sent_index_to_id, predicates_input, sent_left_label, sent_right_label, sent_attn_relpos in zip(
-                    sents, hidden, sents_index_to_id, batch_predicates_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
-                    sent_biaffine_loss = 0
-                    # input1 = []
-                    max_word_length = max(sent_index_to_id)
-                    # words_piece_input = torch.stack(arguments_input)
-                    # input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
-                    labels = torch.zeros(max_word_length + 1, max_word_length + 1).to(device)
-                    arc_num_labels = torch.zeros(max_word_length).to(device)
-                    for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
-                        labels[idx + 1, right_label] = 1
-                        labels[left_label, idx + 1] = 1
-                        arc_num_labels[idx] = len(left_label) + len(right_label)
-                    # for j in range(len(sent_ids)):
-                    #     if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
-                    #         words_index = sent_index_to_id[j] - 1
-                    #         # predicate_input = predicates_input[words_index - 1]
+            if args.finetune is None:
+                hidden = hidden.transpose(0, 1) # non_biaffine
+                word_emb = word_emb.transpose(0, 1)
+                # batch_arguments_input = argument_alignment(hidden, sents_index_to_id)
+                batch_predicates_input = predicate_alignment(hidden, sents_index_to_id, word_emb)
+                if [left_arrow, right_arrow]:
+                    for sent_ids, sent_hidden, sent_index_to_id, predicates_input, sent_left_label, sent_right_label, sent_attn_relpos in zip(
+                        sents, hidden, sents_index_to_id, batch_predicates_input, sents_left_arrow, sents_right_arrow, attn_relpos_for_pointer):
+                        sent_biaffine_loss = 0
+                        # input1 = []
+                        max_word_length = max(sent_index_to_id)
+                        # words_piece_input = torch.stack(arguments_input)
+                        # input2 = torch.unsqueeze(words_piece_input, 0).repeat(max_word_length, 1, 1)
+                        labels = torch.zeros(max_word_length + 1, max_word_length + 1).to(device)
+                        arc_num_labels = torch.zeros(max_word_length).to(device)
+                        for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
+                            labels[idx + 1, right_label] = 1
+                            labels[left_label, idx + 1] = 1
+                            arc_num_labels[idx] = len(left_label) + len(right_label)
+                        # for j in range(len(sent_ids)):
+                        #     if sent_index_to_id[j] != -1 and sent_index_to_id[j] != sent_index_to_id[j + 1]:    # last token of this word
+                        #         words_index = sent_index_to_id[j] - 1
+                        #         # predicate_input = predicates_input[words_index - 1]
+                                
+                        #         # input1.append(predicate_input.view(1, -1))
+
+                        #         if sent_left_label[words_index]:
+                        #             left_labels[words_index][sent_left_label[words_index]] = 1
+                        #         if sent_right_label[words_index]:
+                        #             right_labels[words_index][sent_right_label[words_index]] = 1
+                    
+                        if predicates_input:
+                            # input1 = torch.stack(input1)
+                            # mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:].to(input1.device)
+
+                            # inv_left_labels = mask - left_labels
+                            # inv_right_labels = mask - right_labels
+                            scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
+                            # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
+                            labels = labels[:,1:].unsqueeze(0)
+                            arc_num_labels = arc_num_labels.long().unsqueeze(0)
+                            sent_biaffine_loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            # sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
+
+                            arc_num_prediction = torch.argmax(arc_prob, dim=-1)
+                            arc_scores = scores.clone()
+                            for idx, (arc_pred, arc_true) in enumerate(zip(arc_num_prediction[0], arc_num_labels[0])):
+                                if arc_pred == arc_true:
+                                    arc_acc += 1
+                                topk_infer_num += arc_pred
+                                temp_scores = arc_scores[:, :(idx+2), :(idx+1)]
+                                topk_values, topk_indices = torch.topk(temp_scores.flatten(), k=min(arc_pred, 2 * (idx + 1)))
+                                rows = topk_indices // temp_scores.shape[2]
+                                cols = topk_indices % temp_scores.shape[2]
+                                arc_scores[:, :(idx+2), :(idx+1)] = 0
+                                for row, col in zip(rows, cols):
+                                    if labels[0, row, col] == 1:
+                                        topk_acc_num += 1
+                                
+                            action_num += len(arc_num_labels[0])      
+                            pred = torch.nonzero(scores > 0.5, as_tuple=False)  # start from 0, 0 means root, word start from 1
+                            # right_pred = torch.nonzero(right_logits*mask > 0.5, as_tuple=False) 
+                            label_nonzero = torch.nonzero(labels, as_tuple=False)
+                            # right_label_nonzero = torch.nonzero(right_labels, as_tuple=False)
+
+                            label_num += len(label_nonzero)
                             
-                    #         # input1.append(predicate_input.view(1, -1))
-
-                    #         if sent_left_label[words_index]:
-                    #             left_labels[words_index][sent_left_label[words_index]] = 1
-                    #         if sent_right_label[words_index]:
-                    #             right_labels[words_index][sent_right_label[words_index]] = 1
-                
-                    if predicates_input:
-                        # input1 = torch.stack(input1)
-                        # mask = torch.tril(torch.ones((max_word_length + 1, max_word_length + 1), dtype=torch.float32))[:-1,:].to(input1.device)
-
-                        # inv_left_labels = mask - left_labels
-                        # inv_right_labels = mask - right_labels
-                        scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
-                        # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
-                        labels = labels[:,1:].unsqueeze(0)
-                        arc_num_labels = arc_num_labels.long().unsqueeze(0)
-                        sent_biaffine_loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
-                        # sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
-
-                        arc_num_prediction = torch.argmax(arc_prob, dim=-1)
-                        arc_scores = scores.clone()
-                        for idx, (arc_pred, arc_true) in enumerate(zip(arc_num_prediction[0], arc_num_labels[0])):
-                            if arc_pred == arc_true:
-                                arc_acc += 1
-                            topk_infer_num += arc_pred
-                            temp_scores = arc_scores[:, :(idx+2), :(idx+1)]
-                            topk_values, topk_indices = torch.topk(temp_scores.flatten(), k=min(arc_pred, 2 * (idx + 1)))
-                            rows = topk_indices // temp_scores.shape[2]
-                            cols = topk_indices % temp_scores.shape[2]
-                            arc_scores[:, :(idx+2), :(idx+1)] = 0
-                            for row, col in zip(rows, cols):
-                                if labels[0, row, col] == 1:
-                                    topk_acc_num += 1
+                            infer_num += len(pred)
+                            for pred_row in pred:
+                                for label_row in label_nonzero:
+                                    if torch.equal(pred_row, label_row):
+                                        acc_num += 1
+                            # for pred_row in right_pred:
+                            #     for label_row in right_label_nonzero:
+                            #         if torch.equal(pred_row, label_row):
+                            #             acc_num += 1
                             
-                        action_num += len(arc_num_labels[0])      
-                        pred = torch.nonzero(scores > 0.5, as_tuple=False)  # start from 0, 0 means root, word start from 1
-                        # right_pred = torch.nonzero(right_logits*mask > 0.5, as_tuple=False) 
-                        label_nonzero = torch.nonzero(labels, as_tuple=False)
-                        # right_label_nonzero = torch.nonzero(right_labels, as_tuple=False)
-
-                        label_num += len(label_nonzero)
-                        
-                        infer_num += len(pred)
-                        for pred_row in pred:
-                            for label_row in label_nonzero:
-                                if torch.equal(pred_row, label_row):
-                                    acc_num += 1
-                        # for pred_row in right_pred:
-                        #     for label_row in right_label_nonzero:
-                        #         if torch.equal(pred_row, label_row):
-                        #             acc_num += 1
-                        
-                        biaffine_loss += sent_biaffine_loss.item()
+                            biaffine_loss += sent_biaffine_loss.item()
             num_words += total_length
             num_sents += batch_size
             total_loss += ret.sum().item()
-
-    ppl = np.exp(total_loss / num_words) 
-    biaffine_ppl = np.exp((biaffine_loss + total_loss) / num_words) # biaffineonly
+        
+    if write_test_output is not None:
+        fw = open(write_test_output, 'w')
+        writer = csv.writer(fw, delimiter="\t")
+        writer.writerows(head_data)
     logger = get_logger()
-    if infer_num == 0:
-        f_1 = 0
-        logger.info("Infer nothing...")
-        pre = 0
-        recall = 0
-    else:
-        pre = acc_num / infer_num
-        recall = acc_num / label_num
-        if pre == 0 or recall == 0:
+    if args.finetune is None:
+        ppl = np.exp(total_loss / num_words) 
+        biaffine_ppl = np.exp((biaffine_loss + total_loss) / num_words) # biaffineonly
+        if infer_num == 0:
             f_1 = 0
+            logger.info("Infer nothing...")
+            pre = 0
+            recall = 0
         else:
-            f_1 = 2 * pre * recall / (pre + recall)
-    if topk_infer_num != 0:
-        topk_pre = topk_acc_num / topk_infer_num
-        topk_recall = topk_acc_num / label_num
-        if topk_pre == 0 or topk_recall == 0:
-            topk_f1 = 0
-        else:
-            topk_f1 = 2 * topk_pre * topk_recall / (topk_pre + topk_recall)
-        logger.info(f"topk pre {topk_pre:.4f}, topk rec {topk_recall:.4f}, topk f1 {topk_f1:.4f}")
-    # logger.info(f"eval token loss {total_loss / num_words:.4f}, biffine ppl {biaffine_loss.item() / num_words:.4f}")
-    logger.info(f"eval token ppl {ppl:.4f}, total ppl {biaffine_ppl:.4f}")
-    logger.info(f"pre {pre:.4f}, rec {recall:.4f}, F1 {f_1:.4f}")
-    logger.info(f"action num acc {arc_acc / action_num:.4f}")  
+            pre = acc_num / infer_num
+            recall = acc_num / label_num
+            if pre == 0 or recall == 0:
+                f_1 = 0
+            else:
+                f_1 = 2 * pre * recall / (pre + recall)
+        if topk_infer_num != 0:
+            topk_pre = topk_acc_num / topk_infer_num
+            topk_recall = topk_acc_num / label_num
+            if topk_pre == 0 or topk_recall == 0:
+                topk_f1 = 0
+            else:
+                topk_f1 = 2 * topk_pre * topk_recall / (topk_pre + topk_recall)
+            logger.info(f"topk pre {topk_pre:.4f}, topk rec {topk_recall:.4f}, topk f1 {topk_f1:.4f}")
+        # logger.info(f"eval token loss {total_loss / num_words:.4f}, biffine ppl {biaffine_loss.item() / num_words:.4f}")
+        logger.info(f"eval token ppl {ppl:.4f}, total ppl {biaffine_ppl:.4f}")
+        logger.info(f"pre {pre:.4f}, rec {recall:.4f}, F1 {f_1:.4f}")
+        logger.info(f"action num acc {arc_acc / action_num:.4f}")  
     model.train()
     biaffine_model.train()
     # right_biaffine_model.train()
@@ -533,14 +615,22 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     elif args.finetune == "sst2" or args.finetune == "rte":
         microf1 = finetune_microf1 / num_sents
         logger.info(f"{args.finetune} f1 {microf1:.4f}")
-        return -microf1, f_1
+        return -microf1, 0
     elif args.finetune == "mrpc":
         precision = finetune_pre / finetune_infer if finetune_infer != 0 else 0
         recall = finetune_pre / finetune_label if finetune_label != 0 else 0
         logger.info(f"MRPC acc {finetune_microf1 / num_sents:.4f}")
         microf1 = 2 * (precision*recall)/(precision+recall) if precision != 0 and recall != 0 else 0
         logger.info(f"MRPC f1 {microf1:.4f}")
-        return -microf1, f_1
+        return -microf1, 0
+    elif args.finetune == "sts":
+        prediction = np.array(prediction).reshape(-1)
+        score_label = np.array(score_label).reshape(-1)
+        r, _ = pearsonr(prediction, score_label)
+        spr, _ = spearmanr(prediction, score_label)
+        logger.info(f"---pearson correlation coefficient:{r:.4f}")
+        logger.info(f"---spearman rank correlation coefficient:{spr:.4f}")
+        return -(r+spr), 0
 
 
 def main(args):
@@ -561,11 +651,15 @@ def main(args):
 
     train_data = load_data(train_path, batchsize=batch_size, shuffle=True, seed=args.seed, size=args.dataset)
     dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
-    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+    test_data = load_data(test_path, batchsize=eval_batch_size, shuffle=False, seed=args.seed)
+    if args.finetune == "sts":
+        train_sts_score = load_STS_score(args.sts_train_path, batchsize=batch_size, shuffle=True, seed=args.seed)
+        dev_sts_score = load_STS_score(args.sts_dev_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+        test_sts_score = load_STS_score(args.sts_test_path, batchsize=eval_batch_size, shuffle=False, seed=args.seed)
 
     left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=batch_size, shuffle=True, seed=args.seed, size=args.dataset)
     left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
-    left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
+    left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=args.seed)
 
     vocab_size, pad_id, bos_id, eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id, vocab = load_vocab(args.vocab_file)
     # print(left_arc)
@@ -612,7 +706,7 @@ def main(args):
                                    eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
                                    args.pre_lnorm, args.rel_type, args.degree_len, args.depth_len,
                                    args.distance_len, args.predepth_len)
-        biaffine_model = BiaffineAttention(args.d_inner, args.proj_dim, (args.degree_len, args.depth_len,
+        biaffine_model = BiaffineAttention(args.d_inner, args.w_dim, (args.degree_len, args.depth_len,
                                    args.distance_len, args.predepth_len), type="Multi")
         logger.info(f"Transformer parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in biaffine_model.parameters())}")
@@ -631,9 +725,18 @@ def main(args):
             # right_biaffine_model = checkpoint['right_biaffine_model']
             logger.info("Load exist biaffine model")
         else:
-            biaffine_model = BiaffineAttention(args.w_dim, args.proj_dim, type="Multi")
+            biaffine_model = BiaffineAttention(args.d_inner, args.w_dim, (args.degree_len, args.depth_len,
+                                   args.distance_len, args.predepth_len), type="Multi")
             # right_biaffine_model = BiaffineAttention(args.w_dim, args.proj_dim, type="Multi")
         model = checkpoint['model']
+        if args.finetune is not None:
+            new_model = TransformerGrammar(vocab_size, args.w_dim, args.n_head, args.d_head, args.d_inner, 
+                                   args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
+                                   eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
+                                   args.pre_lnorm, args.rel_type, args.degree_len, args.depth_len,
+                                   args.distance_len, args.predepth_len)
+            new_model.load_state_dict(model.state_dict(), strict=False)
+            model = new_model
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in biaffine_model.parameters())}")
     
@@ -682,7 +785,7 @@ def main(args):
         for param_group in optimizer.param_groups:
             param_group['lr'] = args.max_lr
     
-    if args.model_file != '':
+    if args.model_file != '' and args.finetune is None:
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         warm_up_scheduler.load_state_dict(checkpoint['warm_up_scheduler'])
@@ -721,6 +824,31 @@ def main(args):
         positivelabel = 1.0
         negativelabel = 0.0
 
+    if args.finetune == "sts":
+        model.STS = nn.Linear(args.w_dim, 1)
+        # nn.init.xavier_uniform_(model.STS.weight)
+        # nn.init.zeros_(model.STS.bias)
+        # optimizer = torch.optim.AdamW(model.STS.parameters(), lr=1e-5)
+        old_optimizer_dict = checkpoint['optimizer']
+        old_state = old_optimizer_dict['state']
+        old_param_groups = old_optimizer_dict['param_groups']
+        transformer_params = [p for p in model.parameters() if p.size() != (1, args.w_dim) and p.size() != (1,)]
+        linear_params = list(model.STS.parameters())
+        param_list = [transformer_params, linear_params]
+        lr_list = [1, 1]
+        # optimizer = torch.optim.AdamW([{'params':model.STS.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
+        new_param_groups = optimizer.param_groups
+
+        for group in new_param_groups:
+            for param in group['params']:
+                if param in old_state:
+                    optimizer.state[param] = old_state[param]
+                else:
+                    optimizer.state[param] = {}
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
+        warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
+
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
@@ -736,7 +864,6 @@ def main(args):
     best_val_f1 = 0
     train_step = 0
     remaining_epoch = 0
-
     if args.BTloss_ratio == -1:
         # dynamic learning rate
         # log_start = np.log(0.01)
@@ -755,6 +882,7 @@ def main(args):
         checkpoint_step = (args.num_epochs - 1) * len(train_data)
     else:
         checkpoint_step = 0
+    mseloss = nn.MSELoss(reduction='none')
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0
@@ -815,6 +943,10 @@ def main(args):
             ret, hidden, word_emb, attn_relpos_for_pointer, _ = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
                         args.max_relative_length, args.min_relative_length, sents_index_to_id=sents_index_to_id,
                         sents_arrow=[sents_left_arrow, sents_right_arrow], rel_type=args.rel_type, finetune=args.finetune)
+            if args.finetune == "sts":
+                sts_scores = ret
+                sts_label = torch.tensor(train_sts_score[i]).unsqueeze(1).to(device)
+                ret = mseloss(sts_scores, sts_label)
             biaffine_start = time.time()
             # logger.info(f"transformer foward takes {time.time()-tmp_time:.4f} seconds")
             if (not args.stage_two or (args.stage_two and epoch == args.num_epochs - 1)) and args.finetune is None: # non_biaffine
@@ -839,7 +971,10 @@ def main(args):
                         labels = torch.zeros(max_word_length + 1, max_word_length + 1)
                         arc_num_labels = torch.zeros(max_word_length)
                         for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
-                            labels[idx + 1, right_label] = positivelabel
+                            try:
+                                labels[idx + 1, right_label] = positivelabel
+                            except:
+                                import pdb;pdb.set_trace()
                             labels[left_label, idx + 1] = positivelabel
                             arc_num_labels[idx] = len(left_label) + len(right_label)
 
@@ -954,8 +1089,12 @@ def main(args):
                 # logger.info(f"dev data evaluation ppl {best_val_ppl:.4f}, uas {best_val_uas:.4f}")
             
             if train_step % args.eval_interval == 0 or i == len(train_data) - 1:
-                val_ppl, val_f1 = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model,
+                if args.finetune != "sts":
+                    val_ppl, val_f1 = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model,
                     biaffine_model, dev_length, left_arc, right_arc, args=args)
+                else:
+                    val_ppl, val_f1 = eval(dev_data, dev_index_to_id, left_dev_arrow, right_dev_arrow, startofword_dev, model,
+                    biaffine_model, dev_length, left_arc, right_arc, args=args, score=dev_sts_score)
 
                 # if epoch == args.num_epochs - 2 and i == len(train_data) - 1:
                 #     checkpoint = {'args': args,
@@ -1000,8 +1139,12 @@ def main(args):
                     #     model.cuda()
                     #     biaffine_model.cuda()
                         # right_biaffine_model.cuda()
-                    test_ppl, test_f1 = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, 
-                        biaffine_model, test_length, left_arc, right_arc, args=args)
+                    if args.finetune != "sts":
+                        test_ppl, test_f1 = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, 
+                            biaffine_model, test_length, left_arc, right_arc, args=args, write_test_output=args.write_test_output)
+                    else:
+                        test_ppl, test_f1 = eval(test_data, test_index_to_id, left_test_arrow, right_test_arrow, startofword_test, model, 
+                            biaffine_model, test_length, left_arc, right_arc, args=args, score=test_sts_score, write_test_output=args.write_test_output)
                     logger.info(f"test ppl {test_ppl:.4f}, f1 {test_f1:.4f}")
                 elif args.scheduler == 'decay':
                     remaining_epoch += 1

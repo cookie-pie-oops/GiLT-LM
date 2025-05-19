@@ -2,30 +2,33 @@
 #SBATCH -t 5-00:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH -G 1
-#SBATCH --output=finetune_psd_MRPC.out
+#SBATCH --output=finetune_psd_sst2_4layers_pretrainembedding.out
 
-# eval interval: sst2 50, mrpc 10, rte 20
-export fix_lr=3e-6  # sst2 1e-5, 3e-6
-export epoch=5  # sst2 5, mrpc 15, rte 5
-export dataset=RTE
-export finetune_set=rte
-export eval_interval=20
+export fix_lr=3e-6
+export epoch=5
+export dataset=SST2
+export finetune_set=sst2
+export eval_interval=100
 export DATASIZE=large
 export RELTYPE=mixing
-export LOSSRATIO=0.2    # we won't finetune pointer
+export LOSSRATIO=0.2
+export PARSE=psd
 # baseLM
 python train_graphLayer.py \
     --train_file  ../data_process/$dataset/$dataset\_TRAIN_token.txt \
     --dev_file ../data_process/$dataset/$dataset\_DEV_token.txt \
     --test_file ../data_process/$dataset/$dataset\_TEST_token.txt \
-    --train_arrow_file ../data_process/$dataset/$dataset\_TRAIN_psd_multiarrow_parse_2.txt \
-    --dev_arrow_file ../data_process/$dataset/$dataset\_DEV_psd_multiarrow_parse_2.txt \
-    --test_arrow_file ../data_process/$dataset/$dataset\_TEST_psd_multiarrow_parse_2.txt \
-    --write_test_output ../data_process/$dataset/$dataset\_TEST_pred.tsv \
-    --log_file logs/finetune_psd_graphlayer_$finetune_set.txt \
+    --train_arrow_file ../data_process/$dataset/$dataset\_TRAIN_$PARSE\_multiarrow_parse.txt \
+    --dev_arrow_file ../data_process/$dataset/$dataset\_DEV_$PARSE\_multiarrow_parse.txt \
+    --test_arrow_file ../data_process/$dataset/$dataset\_TEST_$PARSE\_multiarrow_parse.txt \
+    --write_test_output ../data_process/$dataset/$dataset\_TEST_pred_$PARSE.tsv \
+    --sts_train_path ../data_process/STS/STS_TRAIN_score.txt \
+    --sts_dev_path ../data_process/STS/STS_DEV_score.txt \
+    --sts_test_path ../data_process/STS/STS_TEST_score.txt \
+    --log_file logs/finetune_$PARSE\_graphlayer_$finetune_set.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --model_file models/graphlayer_small_psd_4_1:0.2_mixing_ACE_predict_ahead_graph_rel_split_actionnum_head.pt \
-    --save_path models/finetune_psd_graphlayer_$finetune_set.pt \
+    --model_file models/graphlayer_large_4_psd_1_0.2_mixing_predict_ahead_graph_rel_split_actionnum_head.pt \
+    --save_path models/finetune_$PARSE\_graphlayer_$finetune_set\_4layers_pretrainembedding.pt \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
@@ -47,7 +50,7 @@ python train_graphLayer.py \
     --num_layers 16 \
     --max_relative_length 62 \
     --min_relative_length -1 \
-    --seed 12345 \
+    --seed 123456 \
     --weight_decay 0 \
     --max_grad_norm 3.0 \
     --num_epochs $epoch \
