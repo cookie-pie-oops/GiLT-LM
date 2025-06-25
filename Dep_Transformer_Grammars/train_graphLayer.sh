@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH -t 5-00:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH -c 1
+#SBATCH --mem=1M
 #SBATCH -G 1
-#SBATCH --output=graphlayer_small_psd_4_mixing_ACE_predict_ahead_graph_rel_split_actionnum_head_scale.out
+#SBATCH --output=GiLT_large_psd_4_3mixing_easydepth_-distance.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 export DATASET=psd
-export DATASIZE=small
+export DATASIZE=large
 export RELTYPE=mixing
 export LOSSRATIO=0.2
 
@@ -18,16 +19,15 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
     --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_graph_rel_split_actionnum_head_scale.txt \
+    --log_file logs/log_GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_-distance.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_ACE_predict_ahead_graph_rel_split_actionnum_head_scale.pt \
+    --save_path models/GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_-distance.pt \
+    --tape_train_file ../data_process/ACE_arrow/TRAIN_psd_tape_normal_degree \
+    --tape_dev_file ../data_process/ACE_arrow/DEV_psd_tape_normal_degree \
+    --tape_test_file ../data_process/ACE_arrow/TEST_psd_tape_normal_degree \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
-    --degree_len 400 \
-    --distance_len 400 \
-    --depth_len 150 \
-    --predepth_len 74 \
     --attn_mask graphlayer \
     --sentence_level \
     --emb_lr_multiplier 1.0 \

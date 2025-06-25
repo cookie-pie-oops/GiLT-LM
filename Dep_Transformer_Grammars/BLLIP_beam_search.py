@@ -72,6 +72,10 @@ if __name__ == "__main__":
     total_len = 0
     for idx in tqdm(range(len(test_data))):
         encoded = test_data[idx][0]
+        # if idx <= 1400:
+        #     total_len += len(encoded) - 1
+        #     total_ppl = np.log(13.160309315763536) * total_len
+        #     continue
         start_predict_new_word = [1 if startofword_id[encoded[i + 1]] else 0 for i in range(len(encoded) - 1)]
         sent_index_to_id = test_index_to_id[idx][0]
         scores, beam_with_graph = update_beam(encoded, model, biaffine_model, start_predict_new_word,

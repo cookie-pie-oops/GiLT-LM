@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH -t 10-00:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH -c 1
 #SBATCH -G 1
-#SBATCH --output=BLLIP_ppl_pas_large_300_20.out
+#SBATCH --output=BLLIP_ppl_psd_3mixing_large_300_20_-distance.out
 # ../data_process/RTE/RTE_TRAIN_token_parse.txt \
 # ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
 
 python BLLIP_beam_search.py \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --model_path models/graphlayer_large_4_pas_1_0.2_mixing_predict_ahead_graph_rel_split_actionnum_head.pt \
+    --model_path models/GiLT_large_psd_4_1:0.2_3mixing_easydepth_-distance.pt \
     --beamsize 300 \
     --scorebeamsize 20 \
     --parse_file ../data_process/RTE/RTE_TRAIN_psd_multiarrow_parse.txt \

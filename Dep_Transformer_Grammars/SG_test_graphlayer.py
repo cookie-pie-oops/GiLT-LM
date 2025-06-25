@@ -213,5 +213,6 @@ if __name__ == "__main__":
     SG_Score = 0.0
     for key, value in type_acc.items():
         logger.info(f"{key}: {np.mean(value)}")
-        SG_Score += np.mean(value)
-    logger.info(f"SG Score: {SG_Score / len(type_acc)}")
+        if key != "Other":
+            SG_Score += np.mean(value)
+    logger.info(f"SG Score: {SG_Score / (len(type_acc) - 1)}")
