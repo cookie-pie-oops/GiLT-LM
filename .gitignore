@@ -25,3 +25,6 @@ wandb/
 *.tgz
 log.md
 sg_probe.py
+d.py
+d_probe.py
+p.py
