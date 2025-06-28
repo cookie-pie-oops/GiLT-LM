@@ -16,7 +16,7 @@ verbose = True
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, default="push_bllip_con_test_gas1")
-parser.add_argument("--max_stack_depth", type=int, default=150)
+parser.add_argument("--max_stack_depth", type=int, default=50)
 script_args = parser.parse_args()
 
 class TestSuiteParser:
@@ -191,8 +191,13 @@ def eval_blimp(model_args: ModelConfig,
             phen2surprisals = {}
             beam_searcher = BeamSearchDepthBased(beam_size=beam_size, gold_attach=None)
             for phen in examples:
+                
                 sent_list = examples[phen]
-                ids = sp.Encode(sent_list, out_type=int) # flattened
+                assert isinstance(sent_list, str)
+                assert sent_list[-1] in [".", "!", "?"]
+                text = sent_list[:-1] + " " + sent_list[-1] # add a space before the last punctuation
+                
+                ids = sp.Encode(text, out_type=int) # flattened
                 ids = [bos_id] + ids + [eos_id]
                 # to torch tensor
                 ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device) # shape [1, N]
