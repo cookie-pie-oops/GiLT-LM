@@ -9,7 +9,9 @@ import logging
 import time
 import json
 from torch import cuda
+from torch.cuda.amp import autocast, GradScaler
 from helping_utils.logger import configure_logger, get_logger
+import model_bllip_dep
 from model_bllip_dep import TransformerGrammar, BiaffineAttention, find_label_idx
 from scipy.stats import pearsonr, spearmanr
 import csv
@@ -83,9 +85,7 @@ parser.add_argument('--sts_train_path', default=None)
 parser.add_argument('--sts_dev_path', default=None)
 parser.add_argument('--sts_test_path', default=None)
 parser.add_argument('--write_test_output', default=None)
-parser.add_argument('--tape_train_file', default=None)
-parser.add_argument('--tape_dev_file', default=None)
-parser.add_argument('--tape_test_file', default=None)
+parser.add_argument('--mixing_num', default=3, type=int)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -376,7 +376,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
     finetune_pre = 0
     finetune_infer = 0
     finetune_label = 0
-    crit = nn.BCELoss(reduction="none")
+    crit = nn.BCEWithLogitsLoss(reduction="none")
     crit2 = nn.CrossEntropyLoss(reduction="none")
     arc_acc = 0
     action_num = 0
@@ -535,11 +535,11 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
 
                             # inv_left_labels = mask - left_labels
                             # inv_right_labels = mask - right_labels
-                            scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
+                            scores, logits, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
                             # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
                             labels = labels[:,1:].unsqueeze(0)
                             arc_num_labels = arc_num_labels.long().unsqueeze(0)
-                            sent_biaffine_loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            sent_biaffine_loss = crit(logits, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
                             # sent_biaffine_loss += - torch.sum(torch.log((1-right_logits).mul(inv_right_labels) + epsilon).mul(inv_right_labels)) - torch.sum(torch.log(right_logits.mul(right_labels) + epsilon).mul(right_labels))
 
                             arc_num_prediction = torch.argmax(arc_prob, dim=-1)
@@ -657,6 +657,7 @@ def main(args):
 
     batch_size = args.batch_size
     eval_batch_size = args.eval_batch_size
+    model_bllip_dep.mixing_num = args.mixing_num
 
     train_data = load_data(train_path, batchsize=batch_size, shuffle=True, seed=args.seed, size=args.dataset)
     dev_data = load_data(dev_path, batchsize=eval_batch_size, shuffle=True, seed=args.seed)
@@ -744,8 +745,10 @@ def main(args):
             model = new_model
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in biaffine_model.parameters())}")
-    
+    args.BTloss_ratio = sum(p.numel() for p in biaffine_model.parameters()) / sum(p.numel() for p in model.parameters())    # loss ratio
+    logger.info(f"updated btloss ratio: {args.BTloss_ratio:.4f}")
     nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
+    nonemb_params.extend([p for p in biaffine_model.parameters()])
     emb_params = list(model.emb.parameters())
     # param_list = [biaffine_model.parameters(), nonemb_params, emb_params]
     # lr_list = [1, 1, args.emb_lr_multiplier]
@@ -755,20 +758,20 @@ def main(args):
     
     if args.optimizer == 'adam':
         optimizer = torch.optim.Adam([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
-        left_biaffine_optimizer = torch.optim.Adam([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
+        # left_biaffine_optimizer = torch.optim.Adam([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
         # right_biaffine_optimizer = torch.optim.Adam([{'params': right_biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
     elif args.optimizer == 'sgd':
         optimizer = torch.optim.SGD([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
-        left_biaffine_optimizer = torch.optim.SGD([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
+        # left_biaffine_optimizer = torch.optim.SGD([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
         # right_biaffine_optimizer = torch.optim.SGD([{'params': right_biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
     elif args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW([{'params': p, 'lr': lr} for p, lr in zip(param_list, lr_list)], weight_decay=args.weight_decay)
-        left_biaffine_optimizer = torch.optim.AdamW([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
+        # left_biaffine_optimizer = torch.optim.AdamW([{'params': biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
         # right_biaffine_optimizer = torch.optim.AdamW([{'params': right_biaffine_model.parameters(), 'lr': 1}], weight_decay=args.weight_decay)
     else:
         raise NotImplementedError
     
-    crit = nn.BCELoss(reduction="none")
+    crit = nn.BCEWithLogitsLoss(reduction="none")
     crit2 = nn.CrossEntropyLoss(reduction="none")
     # crit = nn.NLLLoss(reduction="mean")
 
@@ -777,13 +780,13 @@ def main(args):
     warm_up_step = args.lr_warm_step
     if args.scheduler == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
-        left_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(left_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
+        # left_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(left_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
         # right_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(right_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
         warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
-        left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
+        # left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
         # right_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(right_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
     elif args.scheduler == 'decay':
-        left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
+        # left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
         # right_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(right_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
         warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
     else:
@@ -794,17 +797,17 @@ def main(args):
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         warm_up_scheduler.load_state_dict(checkpoint['warm_up_scheduler'])
-        left_biaffine_optimizer.load_state_dict(checkpoint['left_biaffine_optimizer'])
+        # left_biaffine_optimizer.load_state_dict(checkpoint['left_biaffine_optimizer'])
         # right_biaffine_optimizer.load_state_dict(checkpoint['right_biaffine_optimizer'])
-        left_biaffine_scheduler.load_state_dict(checkpoint['left_biaffine_scheduler'])
+        # left_biaffine_scheduler.load_state_dict(checkpoint['left_biaffine_scheduler'])
         # right_biaffine_scheduler.load_state_dict(checkpoint['right_biaffine_scheduler'])
-        left_biaffine_warm_up_scheduler.load_state_dict(checkpoint['left_biaffine_warm_up_scheduler'])
+        # left_biaffine_warm_up_scheduler.load_state_dict(checkpoint['left_biaffine_warm_up_scheduler'])
         # right_biaffine_warm_up_scheduler.load_state_dict(checkpoint['right_biaffine_warm_up_scheduler'])
         if torch.cuda.is_available():
-            for state in left_biaffine_optimizer.state.values():
-                for k, v in state.items():
-                    if torch.is_tensor(v):
-                        state[k] = v.cuda()
+            # for state in left_biaffine_optimizer.state.values():
+            #     for k, v in state.items():
+            #         if torch.is_tensor(v):
+            #             state[k] = v.cuda()
             # for state in right_biaffine_optimizer.state.values():
             #     for k, v in state.items():
             #         if torch.is_tensor(v):
@@ -816,10 +819,10 @@ def main(args):
         if args.stage_two:
             decay_steps = len(train_data)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
-            left_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(left_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
+            # left_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(left_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
             # right_biaffine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(right_biaffine_optimizer, T_max=decay_steps - warm_up_step, eta_min=args.eta_min)
             warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
-            left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
+            # left_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(left_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
             # right_biaffine_warm_up_scheduler = torch.optim.lr_scheduler.LambdaLR(right_biaffine_optimizer, lr_lambda=lambda step: (step / warm_up_step * (args.max_lr - args.start_lr) + args.start_lr) if step < warm_up_step else args.max_lr, last_epoch=-1)
     
     if args.smoothlabel:
@@ -889,10 +892,7 @@ def main(args):
     else:
         checkpoint_step = 0
     mseloss = nn.MSELoss(reduction='none')
-    # dev_attn_relpos_for_pointers = torch.load(f"{args.tape_dev_file}.pt")
-    # dev_attn_relpos_for_pointers = [dev_attn_relpos_for_pointers[i:i+eval_batch_size] for i in range(0, len(dev_attn_relpos_for_pointers), eval_batch_size)]
-    # test_attn_relpos_for_pointers = torch.load(f"{args.tape_test_file}.pt")
-    # test_attn_relpos_for_pointers = [test_attn_relpos_for_pointers[i:i+eval_batch_size] for i in range(0, len(test_attn_relpos_for_pointers), eval_batch_size)]
+    scaler = GradScaler(init_scale=2**20)
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0
@@ -930,11 +930,6 @@ def main(args):
                 #         for j in range(len(right_biaffine_optimizer.param_groups)):
                 #             right_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
                 continue
-            # torch.cuda.empty_cache()
-            # if (train_step) % len(train_data) // piece_num != file_index:
-            #     file_index = (train_step + 1) % len(train_data) // piece_num
-            #     attn_relpos_for_pointers = torch.load(f"{args.tape_train_file + str(file_index + 1)}.pt")
-            #     attn_relpos_for_pointers = [attn_relpos_for_pointers[i:i+batch_size] for i in range(0, len(attn_relpos_for_pointers), batch_size)]
             tmp_time = time.time()
             sents = train_data[i]
             sents_index_to_id = train_index_to_id[i]
@@ -947,11 +942,12 @@ def main(args):
             batch_size = len(sents)
             total_length = sum([len(sent) - 1 for sent in sents])
             optimizer.zero_grad()
-            left_biaffine_optimizer.zero_grad()
+            # left_biaffine_optimizer.zero_grad()
             # right_biaffine_optimizer.zero_grad()
             mems = tuple()
             model : TransformerGrammar
-
+            
+            # with autocast(dtype=torch.float16):
             # model.eval()
             # with torch.no_grad():
             #     ret, hidden = model(sents, startofword_train[i], train_length[i], args.attn_mask, args.document_level, args.return_h, 
@@ -989,7 +985,7 @@ def main(args):
                         # mask = torch.ones(max_word_length + 1, max_word_length + 1)
                         # mask = F.pad(mask, (0, padding_size - max_word_length, 0, padding_size - max_word_length))
                         # attn_rel = F.pad(attn_rel, (0, padding_size - max_word_length, 0, padding_size - max_word_length))
-                        labels = torch.zeros(max_word_length + 1, max_word_length + 1)
+                        labels = torch.zeros(max_word_length + 1, max_word_length + 1) # max_word_length
                         arc_num_labels = torch.zeros(max_word_length)
                         # arc_num_mask = torch.ones(max_word_length)
                         # arc_num_mask = F.pad(arc_num_mask, (0, padding_size - max_word_length))
@@ -1009,9 +1005,9 @@ def main(args):
 
                             labels = (labels[:,1:]).unsqueeze(0).to(device)
                             arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
-                            scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
+                            scores, logits, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
                             # _, _, _ = biaffine_model.inference(torch.stack(predicates_input)[:3].unsqueeze(0), attn_rel[:, 2,:3].unsqueeze(1))
-                            loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            loss = crit(logits, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
                             biaffine_loss.append(loss)
                     
                     # batched_predicate = torch.stack(batched_predicate).to(device)
@@ -1021,6 +1017,9 @@ def main(args):
                     # batched_attn_rel = batched_attn_rel.permute(1, 0, 2, 3)
                     # batched_num_mask = torch.stack(batched_num_mask).to(device)
                     # batched_num_label = torch.stack(batched_num_label).long().to(device)
+                    # scores, arc_prob, arc_logits = biaffine_model(batched_predicate, batched_attn_rel)
+                    # loss = (crit(scores, batched_label) * batched_mask).sum(dim= (-1,-2)) + (crit2(arc_logits.permute(0,2,1), batched_num_label) * batched_num_mask).sum(dim= (-1))
+                    # biaffine_loss.append(loss)
 
                     # mini_batch_size = len(batched_predicate) // 4
                     # for piece in range(4):
@@ -1050,7 +1049,7 @@ def main(args):
             # loss = raw_biaffine_loss.mean()
             # train_loss += raw_biaffine_loss.sum().item()
 
-            loss.backward()
+            scaler.scale(loss).backward()
             backward_time = time.time()
             # logger.info(f"Backward takes {backward_time-biaffine_end:.4f} seconds")
            
@@ -1073,37 +1072,28 @@ def main(args):
             # logger.info(f"Step {train_step + 1} Transformer Gradient Norm: {total_norm:.4f}")
             
             if args.max_grad_norm > 0:
+                scaler.unscale_(optimizer)  
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), args.max_grad_norm)
-                # torch.nn.utils.clip_grad_norm_(right_biaffine_model.parameters(), args.max_grad_norm)
-            optimizer.step()
-            left_biaffine_optimizer.step()
-            # right_biaffine_optimizer.step()
+            scaler.step(optimizer)
+            # logger.info(f"scale:{scaler.get_scale()}, lr:{optimizer.param_groups[0]['lr']}, loss:{loss.item()}")
             train_step += 1
             if args.scheduler == 'const':
                 pass
             elif train_step < warm_up_step:
                 warm_up_scheduler.step()
-                left_biaffine_warm_up_scheduler.step()
-                # right_biaffine_warm_up_scheduler.step()
             elif args.scheduler == 'cosine':
                 if train_step < decay_steps:
                     scheduler.step()
-                    left_biaffine_scheduler.step()
-                    # right_biaffine_scheduler.step()
                 else:
                     for j in range(len(optimizer.param_groups)):
                         optimizer.param_groups[j]['lr'] = args.stable_lr
-                    for j in range(len(left_biaffine_optimizer.param_groups)):
-                        left_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
-                    # for j in range(len(right_biaffine_optimizer.param_groups)):
-                    #     right_biaffine_optimizer.param_groups[j]['lr'] = args.stable_lr
-
+            scaler.update()
             num_words += total_length
             num_sents += batch_size
 
             if train_step % args.log_every == 0:    #, B lr {biaffine_optimizer.param_groups[0]['lr']:.6f}
-                logger.info(f"train step {train_step}, T lr {optimizer.param_groups[0]['lr']:.6f}, B lr {left_biaffine_optimizer.param_groups[0]['lr']:.6f}, T loss {train_loss / num_words:.4f}, B loss {train_biaffine_loss / num_words:.4f}")
+                logger.info(f"train step {train_step}, T lr {optimizer.param_groups[0]['lr']:.6f}, T loss {train_loss / num_words:.4f}, B loss {train_biaffine_loss / num_words:.4f}")
                 if (train_loss + train_biaffine_loss) / num_words <= 30:
                     logger.info(f"token ppl {np.exp(train_loss / num_words):.4f}, total ppl {np.exp((train_loss + train_biaffine_loss) / num_words):.4f}")
                 num_words = 0
@@ -1150,13 +1140,13 @@ def main(args):
                                 # 'right_biaffine_model': right_biaffine_model.cpu(),
                                 'vocab': vocab,
                                 'optimizer': optimizer.state_dict(),
-                                'left_biaffine_optimizer': left_biaffine_optimizer.state_dict(),
+                                # 'left_biaffine_optimizer': left_biaffine_optimizer.state_dict(),
                                 # 'right_biaffine_optimizer': right_biaffine_optimizer.state_dict(),
                                 'scheduler': scheduler.state_dict() if args.scheduler == 'cosine' else None,
-                                'left_biaffine_warm_up_scheduler': left_biaffine_warm_up_scheduler.state_dict() if args.scheduler == 'cosine' else None,
+                                # 'left_biaffine_warm_up_scheduler': left_biaffine_warm_up_scheduler.state_dict() if args.scheduler == 'cosine' else None,
                                 # 'right_biaffine_warm_up_scheduler': right_biaffine_warm_up_scheduler.state_dict() if args.scheduler == 'cosine' else None,
                                 'warm_up_scheduler': warm_up_scheduler.state_dict(),
-                                'left_biaffine_scheduler': left_biaffine_scheduler.state_dict(),
+                                # 'left_biaffine_scheduler': left_biaffine_scheduler.state_dict(),
                                 # 'right_biaffine_scheduler': right_biaffine_scheduler.state_dict(),
                                 }
                     torch.save(checkpoint, args.save_path)
@@ -1177,8 +1167,8 @@ def main(args):
                         remaining_epoch = 0
                         for j in range(len(optimizer.param_groups)):
                             optimizer.param_groups[j]['lr'] = max(optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
-                        for j in range(len(left_biaffine_optimizer.param_groups)):
-                            left_biaffine_optimizer.param_groups[j]['lr'] = max(left_biaffine_optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
+                        # for j in range(len(left_biaffine_optimizer.param_groups)):
+                        #     left_biaffine_optimizer.param_groups[j]['lr'] = max(left_biaffine_optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
                         # for j in range(len(right_biaffine_optimizer.param_groups)):
                         #     right_biaffine_optimizer.param_groups[j]['lr'] = max(right_biaffine_optimizer.param_groups[j]['lr'] * args.decay_rate, args.min_lr)
                         logger.info(f"decay lr to {optimizer.param_groups[0]['lr']:.6f}")

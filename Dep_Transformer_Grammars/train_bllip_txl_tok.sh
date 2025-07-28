@@ -22,7 +22,7 @@ python train_dep.py \
     --num_layers 16 \
     --max_relative_length 62 \
     --min_relative_length -1 \
-    --seed 123456 \
+    --seed 12345 \
     --weight_decay 0 \
     --max_grad_norm 3.0 \
     --num_epochs 4 \

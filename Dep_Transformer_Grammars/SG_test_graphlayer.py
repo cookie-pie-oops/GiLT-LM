@@ -184,7 +184,7 @@ if __name__ == "__main__":
                 scores, _ = update_beam(encoded, model, biaffine_model, start_predict_new_word,
                     sent_index_to_id, beamsize, scorebeamsize, device, logger)
 
-                # _, prob = model([encoded[:-1]], None, None, use_mask=None)
+                # _, prob = model([encoded], None, None, use_mask=None)
                 # prob = prob.log_softmax(-2)
                 # scores = [-prob[i, encoded[i + 1]].item() for i in range(len(encoded[1:]))]
                 # scores.insert(0, 0)

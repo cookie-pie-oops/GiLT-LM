@@ -55,12 +55,11 @@ if __name__ == "__main__":
     logger.info("Score beam size: {}".format(scorebeamsize))
     checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
-    biaffine_model = checkpoint['biaffine_model']
     model.eval()
-    biaffine_model.eval()
     model.to(device)
+    biaffine_model = checkpoint['biaffine_model']
+    biaffine_model.eval()
     biaffine_model.to(device)
-
     biaffine_model.set_temperature(1.0)
     
     sp = spm.SentencePieceProcessor(model_file='../data_process/spm_parsing/BLLIP_spm.model')
@@ -80,7 +79,9 @@ if __name__ == "__main__":
             examples = {"sentence_good": sample_list[idx]["sentence_good"], "sentence_bad": sample_list[idx]["sentence_bad"]}
             phen2surprisals = {}
             for phen in examples:
-                encoded = sp.Encode(examples[phen], out_type=int)
+                assert examples[phen][-1] in ["!", ".", "?"]
+                text = examples[phen][:-1] + " " + examples[phen][-1]
+                encoded = sp.Encode(text, out_type=int)
                 encoded.insert(0, 1)
                 encoded.append(2)
                 word_idx = -1
@@ -99,7 +100,8 @@ if __name__ == "__main__":
                 scores, _ = update_beam(encoded, model, biaffine_model, start_predict_new_word, 
                     sent_index_to_id, beamsize, scorebeamsize, device, logger)
                 
-                # _, prob = model([encoded[:-1]], None, None, use_mask=None)
+                # txl eval
+                # _, prob = model([encoded], None, None, use_mask=None)
                 # prob = prob.log_softmax(-2)
                 # scores = [-prob[i, encoded[i + 1]].item() for i in range(len(encoded[1:]))]
                 # scores.insert(0, 0)

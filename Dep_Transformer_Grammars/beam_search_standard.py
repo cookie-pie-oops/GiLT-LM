@@ -502,7 +502,7 @@ if __name__ == "__main__":
 
     configure_logger('logs/beam_all_result_standard.log')
     logger = get_logger()
-    vocab, vocab_size, word2idx, bos, eos, pad_id, left_arc, right_arc, pop_root, startofword_id = load_vocab('tokenizer/spm.vocab')
+    vocab, vocab_size, word2idx, bos, eos, pad_id, left_arc, right_arc, pop_root, startofword_id = load_vocab('../data_process/dtg_spm/spm_dp_cons.vocab')
     # 0,1,2 actions. 3~9 terminals
     BATCH = 1
     BEAM = 100
@@ -524,65 +524,98 @@ if __name__ == "__main__":
     model = checkpoint['model']
     model.eval()
     model.cuda()
-    sp = spm.SentencePieceProcessor(model_file='tokenizer/spm.model')
+    sp = spm.SentencePieceProcessor(model_file='../data_process/dtg_spm/spm.model')
     file_list = os.listdir("test_suites/json/.")
+    file_path = "../data_process/BLLIP_LG_TEST.txt"
+    with open(file_path, 'r') as file:
+        test_data = file.readlines()
+        test_data = [line.strip() for line in test_data[:8]]
+    BEAM = 200
+    WORD_BEAM = 10
+    logger.info(f"BEAM:{BEAM},WORD_BEAM:{WORD_BEAM}")
+    start_time = time.time()
+    total_len = 0
+    for sent in tqdm(test_data):
+        encoded = sp.Encode(sent, out_type=int)
+        total_len += len(encoded) - 1
+        subtoken_begin = [1 if startofword_id[word] == 1 else 0 for word in encoded]
+        subtoken_begin[-2] = 1 # for pop_root
+        subtoken_begin[-1] = 1 # for eos
+        tokens = torch.LongTensor(encoded).cuda().reshape(1, -1)
+        word_num = sum(subtoken_begin) - 2 # -2 for pop_root and eos 
+        subtoken_begin = torch.BoolTensor(subtoken_begin).cuda().reshape(1, -1)
+
+        MAX_LEN = len(tokens[0]) + 2 * (word_num - 1)
+        try:
+            beams, beam_token_scores, beam_scores, beam_sum_scores = word_sync_beam_search(
+                model, ranges, tokens, subtoken_begin, startofword_id, vocab_size, BEAM, WORD_BEAM, SHIFT, MAX_LEN, 15, vocab_meta
+            )
+        except:
+            logger.info(f"sentence len: {len(encoded) - 1} cuda out of memory")
+            break
+        scores = -beam_sum_scores.cpu().numpy() # - means surprisals
+    end_time = time.time()
+    if sent == test_data[0]:
+        logger.info(f"havn't finish the first sentence")
+    logger.info(f"second per token: {(end_time - start_time) / total_len} s")
+    logger.info(f"Max memory usage: {round((torch.cuda.max_memory_allocated()) / 1024 / 1024 / 1024, 2)} GB")
     # print(file_list)
-    for file in file_list:
+    # for file in file_list:
 
-        test_suite_parser = TestSuiteParser(file[:-5])
-        logger.info(file[:-5])
-        BEAM = 100
-        WORD_BEAM = 10
+    #     test_suite_parser = TestSuiteParser(file[:-5])
+    #     logger.info(file[:-5])
+    #     BEAM = 10
+    #     WORD_BEAM = 10
             
-        # print(test_suite_parser.meta_data["formula"])
-        for idx in tqdm(range(len(test_suite_parser.meta_data["data"]))):
-            examples = test_suite_parser.get_example(idx)
-            phen2surprisals = {}
-            for phen in examples:
-                # logger.info(examples[phen])
-                encoded = sp.Encode(examples[phen] + ["."], out_type=int)
-                # logger.info(sp.Encode(" ".join(examples[phen]), out_type=int))
-                tgt_idx = []
-                encoded.insert(0, [bos])
-                encoded.append([pop_root])
-                encoded.append([eos])
-                # logger.info(encoded)
-                word_idx = -1
-                prev_idx = -1
-                for word in encoded:
-                    word_idx += len(word)
-                    tgt_idx.append((prev_idx, word_idx))
-                    prev_idx = word_idx 
-                tgt_idx = tgt_idx[1:-1]
-                encoded = [x for word in encoded for x in word]
+    #     # print(test_suite_parser.meta_data["formula"])
+    #     for idx in tqdm(range(len(test_suite_parser.meta_data["data"]))):
+    #         examples = test_suite_parser.get_example(idx)
+    #         phen2surprisals = {}
+    #         for phen in examples:
+    #             # logger.info(examples[phen])
+    #             encoded = sp.Encode(examples[phen] + ["."], out_type=int)
+    #             # logger.info(sp.Encode(" ".join(examples[phen]), out_type=int))
+    #             tgt_idx = []
+    #             encoded.insert(0, [bos])
+    #             encoded.append([pop_root])
+    #             encoded.append([eos])
+    #             # logger.info(encoded)
+    #             word_idx = -1
+    #             prev_idx = -1
+    #             for word in encoded:
+    #                 word_idx += len(word)
+    #                 tgt_idx.append((prev_idx, word_idx))
+    #                 prev_idx = word_idx 
+    #             tgt_idx = tgt_idx[1:-1]
+    #             encoded = [x for word in encoded for x in word]
 
-                # target_surprisals, logprobs, target_idxs, _ = evaluator.get_surprisals(
-                #     examples[phen]
-                # )
-                subtoken_begin = [1 if startofword_id[word] == 1 else 0 for word in encoded]
-                subtoken_begin[-2] = 1 # for pop_root
-                subtoken_begin[-1] = 1 # for eos
-                tokens = torch.LongTensor(encoded).cuda().reshape(1, -1)
-                word_num = sum(subtoken_begin) - 2 # -2 for pop_root and eos 
-                subtoken_begin = torch.BoolTensor(subtoken_begin).cuda().reshape(1, -1)
+    #             # target_surprisals, logprobs, target_idxs, _ = evaluator.get_surprisals(
+    #             #     examples[phen]
+    #             # )
+    #             subtoken_begin = [1 if startofword_id[word] == 1 else 0 for word in encoded]
+    #             subtoken_begin[-2] = 1 # for pop_root
+    #             subtoken_begin[-1] = 1 # for eos
+    #             tokens = torch.LongTensor(encoded).cuda().reshape(1, -1)
+    #             word_num = sum(subtoken_begin) - 2 # -2 for pop_root and eos 
+    #             subtoken_begin = torch.BoolTensor(subtoken_begin).cuda().reshape(1, -1)
 
-                MAX_LEN = len(tokens[0]) + 2 * (word_num - 1)
-                beams, beam_token_scores, beam_scores, beam_sum_scores = word_sync_beam_search(
-                    model, ranges, tokens, subtoken_begin, startofword_id, vocab_size, BEAM, WORD_BEAM, SHIFT, MAX_LEN, 15, vocab_meta
-                )
-                scores = -beam_sum_scores.cpu().numpy() # - means surprisals
-                target_surprisals = [scores[0][tgt_idx[i][1]] - scores[0][tgt_idx[i][0]] for i in range(len(tgt_idx))]
-                # print(target_surprisals)
-                # logger.info(target_surprisals)
-                phen2surprisals[phen] = [0] + target_surprisals
+    #             MAX_LEN = len(tokens[0]) + 2 * (word_num - 1)
+    #             beams, beam_token_scores, beam_scores, beam_sum_scores = word_sync_beam_search(
+    #                 model, ranges, tokens, subtoken_begin, startofword_id, vocab_size, BEAM, WORD_BEAM, SHIFT, MAX_LEN, 15, vocab_meta
+    #             )
+    #             scores = -beam_sum_scores.cpu().numpy() # - means surprisals
+    #             target_surprisals = [scores[0][tgt_idx[i][1]] - scores[0][tgt_idx[i][0]] for i in range(len(tgt_idx))]
+    #             # print(target_surprisals)
+    #             # logger.info(target_surprisals)
+    #             phen2surprisals[phen] = [0] + target_surprisals
 
-            extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
-            test_suite_parser.answers[idx] = extracted_formula
+    #         extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
+    #         test_suite_parser.answers[idx] = extracted_formula
         
-        acc = 0.0
-        for formula in test_suite_parser.answers:
-            answer = eval_math_expr(formula)
-            logger.info(f"score: {answer}")
-            acc += answer
+    #     acc = 0.0
+    #     for formula in test_suite_parser.answers:
+    #         answer = eval_math_expr(formula)
+    #         logger.info(f"score: {answer}")
+    #         acc += answer
             
-        logger.info(f"correct rate: {acc / len(test_suite_parser.answers)}")
+    #     logger.info(f"correct rate: {acc / len(test_suite_parser.answers)}")

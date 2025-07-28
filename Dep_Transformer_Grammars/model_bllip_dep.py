@@ -1,16 +1,18 @@
 import copy
+from collections import deque, defaultdict
 import heapq
 import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
+import math
 # from masking_bllip import utils as masking_utils
 # from masking_bllip import masking_types as types
 import time
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
 
-mixing_num = 3 # ablation
+mixing_num = 2 # ablation
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -64,7 +66,7 @@ def find_label_idx(sent, prefix):
 
 class FF_llama(nn.Module):
     def __init__(self, d_model, d_inner):
-        super(FF_lamma, self).__init__()
+        super(FF_llama, self).__init__()
         d_inner = int(2 * d_inner / 3)
 
         self.w1 = nn.Linear(d_model, d_inner)
@@ -76,6 +78,22 @@ class FF_llama(nn.Module):
     def forward(self, inp):
         x = self.layer_norm(inp)
         return inp + self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+class FF_llama2(nn.Module):
+    def __init__(self, d_in, d_inner, d_out):
+        super(FF_llama2, self).__init__()
+        # d_inner = int(2 * d_inner / 3)
+        d_inner = int(d_inner * (d_in + d_out) / (2 * d_in + d_out))
+
+        self.w1 = nn.Linear(d_in, d_inner)
+        self.w2 = nn.Linear(d_inner, d_out)
+        self.w3 = nn.Linear(d_in, d_inner)
+
+        # self.layer_norm = RMSNorm(d_in)
+
+    def forward(self, x):
+        # x = self.layer_norm(inp)
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
 # class Attention_llama(nn.Module):
@@ -152,6 +170,50 @@ class FF_llama(nn.Module):
 #         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
 #         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 #         return self.wo(output)
+
+
+class IncrementalBellmanFord:
+    def __init__(self, n):
+        self.n = n
+        self.adj = defaultdict(list)
+        self.dist = [float('inf')] * n
+        self.in_queue = [False] * n
+
+    def add_edge(self, u, v, w):
+        self.adj[u].append((v, w))
+        self._update(u)
+
+    def _update(self, start):
+        q = deque()
+        q.append(start)
+        self.in_queue[start] = True
+        while q:
+            u = q.popleft()
+            self.in_queue[u] = False
+            for v, w in self.adj[u]:
+                if self.dist[u] + w < self.dist[v]:
+                    self.dist[v] = self.dist[u] + w
+                    if not self.in_queue[v]:
+                        q.append(v)
+                        self.in_queue[v] = True
+
+    def set_source(self, src):
+        self.dist = [float('inf')] * self.n
+        self.dist[src] = 0
+        self._update(src)
+
+    def get_dist_from_v(self, v):
+        return self.dist[v] if self.dist[v] != float('inf') else None
+    
+    def get_dist(self):
+        return self.dist
+    
+    def get_depth_for_GiLT(self):
+        return [item + 1 if item != float('inf') else 0 for item in self.dist]
+    
+    def get_dist_for_GiLT(self):
+        return [item if item != float('inf') else 0 for item in self.dist]
+
 
 def dijkstra(adj_matrix, start):
     n = len(adj_matrix)
@@ -332,13 +394,17 @@ class BiaffineAttention(nn.Module):
         self.temperature = 1.0
         self.concat_dim = input_dim * 3
 
-        self.f_1 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)  #3072->3072->2048
-        self.f_3 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)
-        self.b_1 = nn.Parameter(torch.rand(input_dim + 1, input_dim + 1))
-        self.b_2 = nn.Parameter(torch.rand(input_dim, input_dim))
+        # self.f_1 = MLPforBiaffine(input_dim, 2 * input_dim, self.concat_dim)  #3072->3072->2048
+        # self.f_3 = MLPforBiaffine(input_dim, 2 * input_dim, self.concat_dim)
+        self.f_1 = nn.Sequential(FF_llama(2048, 3096))
+        self.f_3 = nn.Sequential(FF_llama(2048, 3096))
+        self.b_1 = nn.Parameter(torch.rand(600 + 1, 600 + 1))
+        self.b_2 = nn.Parameter(torch.rand(600, 600))
 
-        self.f_2 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)  #2048->2048->1024
-        self.f_4 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)
+        # self.f_2 = MLPforBiaffine(600, 2048, 3 * input_dim)  #2048->2048->1024
+        # self.f_4 = MLPforBiaffine(600, 2048, 3 * input_dim)
+        self.f_2 = FF_llama2(2048, 3 * input_dim, 600)
+        self.f_4 = FF_llama2(2048, 3 * input_dim, 600)
 
         self.pos_emb = PositionalEmbedding(input_dim)
         self.pos_to_parent_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
@@ -347,12 +413,12 @@ class BiaffineAttention(nn.Module):
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
-            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 3))
+            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 2))
             self.softmax = nn.Sigmoid()
             nn.init.xavier_uniform_(self.root_representation)
         
         self.arc_softmax = nn.Softmax(dim=-1)
-        self.prob = nn.Linear(input_dim, 30)
+        self.prob = nn.Linear(600, 30)
         
     def forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
         # attn_relpos = torch.stack([attn_relpos[0], attn_relpos[1], attn_relpos[2]]).to(attn_relpos.device)  # ablation
@@ -395,23 +461,24 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        scores = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        logits = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
 
         # square = (parent_hidden * child_hidden).clone()
         square = torch.einsum('bijn,nn,bijn->bijn', parent_hidden, self.b_2, child_hidden)
         steps = torch.arange(1, time_step + 1, device=hidden.device)
         scales = torch.sqrt(steps * 2).view(1, -1, 1)  # (1, time_step, 1)
-        mask = torch.zeros((batchsize, time_step, time_step, time_step + 1), device=hidden.device) != 0
-        for step in range(time_step):
-            mask[:, step, :(step+1), step + 1] = True
-            mask[:, step, step, :(step+2)] = True
-        masked_square = square.unsqueeze(1)  * mask.unsqueeze(-1)
-        arc_num_scores = masked_square.sum(dim=(-2, -3)) / scales
+        row_mask = torch.tril(torch.ones_like(position))[:-1, :]
+        col_mask = torch.ones_like(position)[:-1, :] - row_mask
+        row_sum = (square * row_mask.unsqueeze(-1)).sum(dim=-2)
+        col_sum = (square * col_mask.unsqueeze(-1)).sum(dim=-3)[:, 1:, :]
+        row_col_sum = row_sum + col_sum
+        arc_num_scores = row_col_sum / scales   # b*l*n
         arc_num_logits = self.prob(arc_num_scores)
         arc_num_prob = self.arc_softmax(arc_num_logits)
-        scores = self.softmax(scores)
-        return scores, arc_num_prob, arc_num_logits
-    
+        scores = self.softmax(logits)
+        return scores, logits, arc_num_prob, arc_num_logits
+
+
     def set_temperature(self, value):
         self.temperature = value
 
@@ -447,47 +514,18 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        # scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
-        scores = torch.zeros(batchsize, parent_hidden.shape[1], child_hidden.shape[1])
-        scores[:, -1:, :] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden[:,-1:,:], (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
-        scores[:, :, -1:] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
+        scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        # scores = torch.zeros(batchsize, parent_hidden.shape[1], child_hidden.shape[1])
+        # scores[:, -1:, :] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden[:,-1:,:], (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        # scores[:, :, -1:] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
         scores = self.softmax(scores)
-        # arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2, child_hidden)
-        arc_num_scores = (torch.einsum('bn, nn, bjn->bjn', parent_hidden[:,-1,:], self.b_2, child_hidden[:,:-1,:]).sum(dim=-2) + torch.einsum('bin, nn, bn->bin', parent_hidden, self.b_2, child_hidden[:,-1,:]).sum(dim=-2)) / np.sqrt(2 * child_hidden.shape[1])
+        arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2, child_hidden)
+        # arc_num_scores = (torch.einsum('bn, nn, bjn->bjn', parent_hidden[:,-1,:], self.b_2, child_hidden[:,:-1,:]).sum(dim=-2) + torch.einsum('bin, nn, bn->bin', parent_hidden, self.b_2, child_hidden[:,-1,:]).sum(dim=-2)) / np.sqrt(2 * child_hidden.shape[1])
         # arc_num_scores = torch.einsum('bin, bjn->bijn', parent_hidden, child_hidden)
-        # arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
+        arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
         arc_num_logits = self.prob(arc_num_scores)
         arc_num_prob = self.arc_softmax(arc_num_logits)
         return scores, arc_num_prob, arc_num_logits
-
-    def inference2(self, hidden, step_attn_relpos):
-        batchsize = hidden.shape[0]
-        child_hidden = self.f_3(hidden)
-        if self.type == "Multi":
-            repeat_shape = list(hidden.shape)
-            repeat_shape[-1] = 1
-            repeat_shape[-2] = 1
-            root_tokens = self.root_representation.repeat(*repeat_shape)
-            hidden = torch.cat((root_tokens, hidden), dim=hidden.dim() - 2)
-        parent_hidden = self.f_1(hidden)
-
-        step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
-        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (0,1))
-        step_attn_relpos = F.pad(step_attn_relpos, (0,1))
-        embed_tuple_parent = [self.depth_embed[i](step_attn_relpos[i]) for i in range(len(step_attn_relpos))]
-        embed_biases_parent = torch.cat(embed_tuple_parent, dim=-1)
-        embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
-
-        parent_position = torch.arange(child_hidden.size(1), -1, -1.0, device=hidden.device).long()
-        parent_position = self.pos_emb(parent_position).permute(1, 0, 2).repeat(batchsize, 1, 1)
-        parent_position_info = self.pos_to_parent_k(parent_position)
-        parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
-
-        parent_hidden = self.f_2(parent_hidden)
-        child_hidden = self.f_4(child_hidden)
-        scores = torch.einsum('bjd,ddh,bid->bjh', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
-        scores = self.softmax(scores)
-        return scores
 
 class PositionalEmbedding(nn.Module):
     def __init__(self, demb):
@@ -1011,18 +1049,27 @@ class TransformerGrammar(nn.Module):
                     
                     graph_len = len(left_sent_arrow) + 1
                     graph = np.zeros((graph_len, graph_len))
+                    # Incremental_depth = IncrementalBellmanFord(graph_len)
+                    # Incremental_depth.set_source(0)
                     sent_attn_relpos = np.zeros((length_i, length_i))
                     sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
                     sent_attn_relpos_for_pointer[:, 0] = 1  # root
+                    depth_res = []
                     for i in range(len(left_sent_arrow)):
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
+                                # Incremental_depth.add_edge(j, i + 1, 1)
+                                # Incremental_depth.add_edge(i + 1, j, 1)
                                 graph[j][i + 1] = 1
                                 graph[i + 1][j] = 1
                         if right_sent_arrow[i]: #i -> j
                             for j in right_sent_arrow[i]:
+                                # Incremental_depth.add_edge(i + 1, j, 1)
+                                # Incremental_depth.add_edge(j, i + 1, 1)
                                 graph[i + 1][j] = 1
                                 graph[j][i + 1] = 1
+                        # cur_depth = Incremental_depth.get_depth_for_GiLT()
+                        # depth_res.append(cur_depth)
                     
                     last_finished_word_idx = None
                     finished_word_idx = None
@@ -1033,19 +1080,21 @@ class TransformerGrammar(nn.Module):
                             continue
                         finished_word_idx = sent_index_to_id[i] # first token max(sent_index_to_id[i - 1], 0)
                         depth = calculate_depth(graph[:finished_word_idx + 1, :finished_word_idx + 1])
+                        # depth = depth_res[finished_word_idx - 1]
                         if last_finished_word_idx:
                             depth[1:last_finished_word_idx + 1] = [0] * last_finished_word_idx
                         # if rel_type == "rel_depth":
                         # depth = [item - depth[finished_word_idx] for item in depth]
                         for id, depth_value in enumerate(depth[1:]):
                             sent_attn_relpos[i, id_to_index[id + 1]] = depth_value
+                        # sent_attn_relpos_for_pointer[finished_word_idx] = np.array(depth)
                         for id, depth_value in enumerate(depth):
                             sent_attn_relpos_for_pointer[finished_word_idx, id] = depth_value
                     # for j in range(length_i - len(sent_attn_relpos)):
                     #     sent_attn_relpos.append([0]*(length_i))
                     attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
                     attn_relpos.append(sent_attn_relpos)
-            if rel_type == "distance":
+            if rel_type == "distance" or rel_type == "mixing":
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
                     input_size = len(sent_index_to_id) - 1
                     id_to_index = {}
@@ -1058,17 +1107,26 @@ class TransformerGrammar(nn.Module):
                     
                     graph_len = len(left_sent_arrow) + 1
                     graph = np.zeros((graph_len, graph_len))
+                    # Incremental_distance = IncrementalBellmanFord(graph_len)
                     sent_attn_relpos = np.zeros((length_i, length_i))
                     sent_attn_relpos_for_pointer = np.zeros((max(sent_index_to_id) + 1, (max(sent_index_to_id)) + 1))
+                    distance_res = []
                     for i in range(len(left_sent_arrow)):
+                        # Incremental_distance.set_source(i + 1)
                         if left_sent_arrow[i]:  #i <- j
                             for j in left_sent_arrow[i]:
+                                # Incremental_distance.add_edge(j, i + 1, 10)
+                                # Incremental_distance.add_edge(i + 1, j, 1)
                                 graph[j][i + 1] = 10 # 10
                                 graph[i + 1][j] = 1
                         if right_sent_arrow[i]: #i -> j
                             for j in right_sent_arrow[i]:
+                                # Incremental_distance.add_edge(i + 1, j, 10)
+                                # Incremental_distance.add_edge(j, i + 1, 1)
                                 graph[i + 1][j] = 10 # 10
                                 graph[j][i + 1] = 1
+                        # cur_distance= Incremental_distance.get_dist_for_GiLT()
+                        # distance_res.append(cur_distance)
 
                     last_finished_word_idx = None
                     finished_word_idx = None
@@ -1079,10 +1137,12 @@ class TransformerGrammar(nn.Module):
                             continue
                         finished_word_idx = sent_index_to_id[i] # first token max(sent_index_to_id[i - 1], 0)
                         distance = dijkstra(graph[:finished_word_idx + 1, :finished_word_idx + 1], finished_word_idx)
+                        # distance = distance_res[finished_word_idx - 1]
                         if last_finished_word_idx:
                             distance[1:last_finished_word_idx + 1] = [0] * last_finished_word_idx
                         for id, distance_value in enumerate(distance[1:]):
                             sent_attn_relpos[i, id_to_index[id + 1]] = distance_value
+                        # sent_attn_relpos_for_pointer[finished_word_idx] = np.array(distance)
                         for id, distance_value in enumerate(distance):
                             sent_attn_relpos_for_pointer[finished_word_idx, id] = distance_value
                     # for j in range(length_i - len(sent_attn_relpos)):
@@ -1425,7 +1485,7 @@ class TransformerGrammar(nn.Module):
                 STS_output = self.STS(hiddens[-1][[len(sent) - 2 for sent in x], [i for i in range(batch)]])
                 return STS_output, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
             if use_mask == "graphlayer":
-                return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
+                return loss, (hiddens[9] + hiddens[15]) / 2, word_emb, attn_relpos_for_pointer, prob    #torch.cat([hiddens[9], hiddens[15]], dim = -1)
                 # return loss, hiddens[9] + hiddens[15]
             return loss, core_out, prob
         elif finetune == "sts":
@@ -1659,7 +1719,54 @@ class TransformerGrammar(nn.Module):
             new_keys = new_keys.reshape(new_keys.size(0), new_keys.size(1), -1)
             new_values = new_values.reshape(new_values.size(0), new_values.size(1), -1)
 
-            return prob, new_keys, new_values, torch.cat([hiddens[9], hiddens[15]], dim = -1)
+            return prob, new_keys, new_values, hiddens[9] + hiddens[15]     # torch.cat([hiddens[9], hiddens[15]], dim = -1)
+    
+    def TXL_inference(self, x, past_keys, past_values, seq_len):
+        with torch.no_grad():
+            inp = x.permute(1, 0).contiguous()  # 1 * batch new token
+            word_emb = self.emb(inp)
+            pos_emb = self.pos_emb(torch.arange(seq_len - 1, -1, -1.0, device = word_emb.device))
+            batch = x.shape[0]
+            new_keys = torch.full((self.num_layers, 1, batch, self.w_dim), 0.0, device=word_emb.device)
+            new_values = torch.full((self.num_layers, 1, batch, self.w_dim), 0.0, device=word_emb.device)
+            
+            past_keys_p = None
+            past_values_p = None
+            if past_keys is not None:
+                past_keys_p = past_keys.reshape(past_keys.size(0), past_keys.size(1), self.num_layers, self.w_dim)
+                past_values_p = past_values.reshape(past_values.size(0), past_values.size(1), self.num_layers, self.w_dim)
+                past_keys_p = past_keys_p.permute(2, 1, 0, 3).contiguous() # layer * L-1 * batch * w_dim
+                past_values_p = past_values_p.permute(2, 1, 0, 3).contiguous() 
+
+            hiddens = []
+            core_out = word_emb
+            hiddens.append(core_out)
+            for i, layer in enumerate(self.layers):
+                if past_values_p is not None:
+                    core_out, new_key, new_value = \
+                                    layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
+                                    attn_mask=None, attn_relpos=None, 
+                                    min_len=0, max_len=150, rel_embed = None,
+                                    past_keys=past_keys_p[i], past_values=past_values_p[i], cache=True)
+                else:
+                    core_out, new_key, new_value = \
+                                    layer(core_out, pos_emb, self.r_w_bias, self.r_r_bias, 
+                                    attn_mask=None, attn_relpos=None, 
+                                    min_len=0, max_len=150, rel_embed = None,
+                                    past_keys=None, past_values=None, cache=True)
+                hiddens.append(core_out)
+                new_keys[i] = new_key
+                new_values[i] = new_value
+            
+            logits = self.projection(core_out) 
+            prob = logits.view(1, batch, -1)
+            prob = prob.log_softmax(-1)
+            new_keys = new_keys.permute(2, 1, 0, 3).contiguous()
+            new_values = new_values.permute(2, 1, 0, 3).contiguous()
+            new_keys = new_keys.reshape(new_keys.size(0), new_keys.size(1), -1)
+            new_values = new_values.reshape(new_values.size(0), new_values.size(1), -1)
+
+            return prob, new_keys, new_values
     
 
     def get_emb(self, input_id):
@@ -1739,4 +1846,25 @@ class TransformerGrammar(nn.Module):
 
             return prob, new_keys, new_values
 
-                
+if __name__ == '__main__':
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
+    biaffine_model.to(device)
+    inp = torch.rand(64, 20, 3072).to(device)
+    attn_inp = torch.rand(2, 64, 20).to(device)
+    attn_inp2 = torch.rand(2, 64, 20, 21).to(device)
+    start_time = time.time()
+    for i in range(10):
+        # out = biaffine_model.inference(inp, attn_inp)
+        out2 = biaffine_model.forward(inp, attn_inp2)
+        # import pdb;pdb.set_trace()
+    end_time = time.time()
+    print((end_time - start_time) / 10)
+
+    # cpu original 1.29s average
+    # cpu 8 * 128 1.04s
+    # cpu 16 * 64 1.05s
+    # cpu fast 8 * 128 0.62s
+
+    # gpu original 0.095s
+    # gpu fast 0.06s

@@ -8,6 +8,7 @@ import numba.cuda as cuda
 import argparse
 import time
 from helping_utils.logger import configure_logger, get_logger
+import model_bllip_dep
 from model_bllip_dep import TransformerGrammar, BiaffineAttention, calculate_depth, dijkstra, find_label_idx
 from copy import deepcopy
 import json
@@ -19,6 +20,28 @@ import math
 import heapq
 from itertools import count
 import random
+
+def bellmanford(adj, src):
+    length = len(adj)
+    dist = [float('inf')] * length
+    dist[src] = 0
+    for _ in range(length - 1):
+        updated = False
+        for u in range(length):
+            if dist[u] == float('inf'):
+                continue
+            for v in range(length):
+                w = adj[u][v].item()
+                if w == 0:
+                    continue
+                if dist[u] + w < dist[v]:
+                    dist[v] = dist[u] + w
+                    updated = True
+        if not updated:
+            break
+    
+    return [item if item != float('inf') else 0 for item in dist]
+
 
 def load_vocab(path):
     vocab_file = path
@@ -172,7 +195,7 @@ class Graphinfo:
         self.father_tag = father_tag
     
     def get_info(self):
-        return self.degree.clone(), self.distance.clone(), self.graph.clone(), self.father_tag.clone()
+        return self.degree.clone(), self.distance.clone(), self.graph.clone(), self.father_tag  # clone
     
     @classmethod
     def from_existing(cls, degree_list, graph_distance, graph, father_tag):
@@ -208,22 +231,18 @@ def update_concat(tensor1, tensor2):
         return tensor2
 
 def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_index_to_id, beamsize, scorebeamsize, device, logger):
-    with torch.no_grad():
+    with torch.no_grad():   # torch.cuda.amp.autocast(dtype=torch.float16)
         counter = count()
         tokens = torch.LongTensor(encoded[:-1]).to(device).reshape(1, -1)
-        id_to_index = {}
-        for i in range(len(sent_index_to_id)):
-            if sent_index_to_id[i] != -1:
-                if sent_index_to_id[i] not in id_to_index:
-                    id_to_index[sent_index_to_id[i]] = [i]
-                else:
-                    id_to_index[sent_index_to_id[i]].append(i)
+        id_to_index = sent_index_to_id[:-1]
+        id_to_index[0] = 0
+        id_to_index = torch.LongTensor(id_to_index).to(device)
 
         graph_len = max(sent_index_to_id) + 1
         graph = torch.zeros((graph_len, graph_len))
         graph_distance = torch.zeros((graph_len, graph_len))
         degree_list = torch.zeros(graph_len)
-        father_tag = torch.zeros(graph_len - 1)
+        father_tag = None
         # arcbeam = BEAM(beamsize)
         arcbeam = []
         scores = [0.0]
@@ -232,7 +251,12 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
         # arcbeam.update(0.0, next(counter), init_graphinfo, None, None, None)    #init
         arcbeam.append((0.0, init_graphinfo, None, None, None))
 
+        s1 = time.time()
+        model_bllip_dep.mixing_num = 3
+        attn_relpos = torch.zeros(model_bllip_dep.mixing_num, 1, 1, 1).long().to(device)  #ablation
         for i in range(tokens.shape[1]):
+            times1 = []
+            times4 = []
             # get temp beam
             start_time = time.time()
             # temp_beam = arcbeam.get_graphinfo()
@@ -240,34 +264,24 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
             temp_score = [tup[0] for tup in temp_beam]
             batch = len(arcbeam)
             mask_size = i + 1
-            attn_relpos = torch.zeros(3, batch, 1, mask_size).long()  #ablation
-            attn_relpos_for_pointer = torch.zeros(3, batch, max(sent_index_to_id[i], 0) + 1).long()  #ablation
+            attn_relpos_for_pointer = torch.zeros(model_bllip_dep.mixing_num, batch, max(sent_index_to_id[i], 0) + 1).long().to(device)  #ablation
             degree_index, depth_index, distance_index, pred_depth_index = 0, 1, 2, 3  #ablation
             attn_relpos_for_pointer[depth_index, :, 0] = 1 # root always depth 1
             for step, (step_score, step_graphinfo, pre_k, pre_v, pre_hiddens) in enumerate(temp_beam):
                 degree_list, graph_distance, graph, father_tag = step_graphinfo.get_info()
+                # start = time.perf_counter()
                 if sent_index_to_id[i] != -1:
+                    # 31s / 73s
                     depth_list = calculate_depth(graph[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1])
                     distance_list = dijkstra(graph_distance[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1], sent_index_to_id[i])  # graph_distance
-                    for id in range(len(attn_relpos_for_pointer[degree_index, step])):
-                        attn_relpos_for_pointer[degree_index, step, id] = degree_list[id]  # previous step graph
-                    for id in range(len(attn_relpos_for_pointer[depth_index, step])):
-                        attn_relpos_for_pointer[depth_index, step, id] = depth_list[id]
-                    for id in range(len(attn_relpos_for_pointer[distance_index, step])):
-                        attn_relpos_for_pointer[distance_index, step, id] = distance_list[id]
-                    
-                    for id, degree_value in enumerate(degree_list[1:]):
-                        attn_relpos[degree_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = degree_value.item()
-                    for id, depth_value in enumerate(depth_list[1:]):
-                        attn_relpos[depth_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = depth_value
-                    for id, distance_value in enumerate(distance_list[1:]):
-                        attn_relpos[distance_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = distance_value
-                    # pred_depth = torch.sum(father_tag[:sent_index_to_id[i]] == 0).item()
-                    # for id, father_value in enumerate(father_tag[:sent_index_to_id[i]]):
-                    #     if father_value != 1:
-                    #         attn_relpos_for_pointer[pred_depth_index, step, id + 1] = pred_depth
-                    #         attn_relpos[pred_depth_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = pred_depth
-                    #         pred_depth -= 1
+                    # distance_list = bellmanford(graph_distance[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1], sent_index_to_id[i])  # graph_distance
+                    length = len(attn_relpos_for_pointer[degree_index, step])
+                    attn_relpos_for_pointer[:, step, :length] = torch.tensor([degree_list[:length].numpy().tolist(), depth_list, distance_list], dtype=attn_relpos_for_pointer.dtype, device=device)
+                    idx = id_to_index[:mask_size].view(1, 1, -1).repeat(3, batch, 1)
+                    attn_relpos = attn_relpos_for_pointer.gather(dim=-1, index=idx).unsqueeze(2)
+                    attn_relpos[:, :, :, 0] = 0
+
+                # times1.append(time.perf_counter() - start)
             if i == 0:
                 cache_k = None
                 cache_v = None
@@ -277,7 +291,7 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
             # rowattn_relpos =  torch.zeros(4, 1, i+1, i+1).long().to(device)
             # batchprob = model.GraphlayerLM_inference(tokens, None, None, rowattn_relpos)
             # [batchprob[0].view(len(encoded[1:]),-1)[idx, encoded[idx + 1]].item() for idx in range(12)]
-            prob, new_k, new_v, new_hiddens = model.GraphlayerLM_inference(tokens[:, i].repeat(batch, 1), cache_k, cache_v, attn_relpos.to(device))
+            prob, new_k, new_v, new_hiddens = model.GraphlayerLM_inference(tokens[:, i].repeat(batch, 1), cache_k, cache_v, attn_relpos)
             new_hiddens = new_hiddens.transpose(0, 1)
             transformerforward = time.time()
             # logger.info("Transformer forward time: {}".format(transformerforward - start_time))
@@ -293,8 +307,8 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                     step_hiddens = update_concat(step_pre_hiddens, predicate)
                     predicate_list.append(step_hiddens)
                 predicates = torch.stack(predicate_list).squeeze(1)
-                with torch.no_grad():
-                    graph_scores, arc_num_prob, _ = biaffine_model.inference(predicates, attn_relpos_for_pointer.to(device))
+                # with torch.cuda.amp.autocast(dtype=torch.float16):
+                graph_scores, arc_num_prob, _ = biaffine_model.inference(predicates, attn_relpos_for_pointer)
                 graph_scores, arc_num_prob = graph_scores.cpu(), arc_num_prob.cpu()
             pointertime = time.time()
             # logger.info("Pointer time: {}".format(pointertime - transformerforward))
@@ -318,6 +332,7 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                 # stepbeam.update(temp_score[step], next(counter), temp_beam[step][1], cache_k, cache_v, step_hiddens)
                 # candidates = [(temp_score[step], temp_beam[step][1], cache_k, cache_v, step_hiddens)]
                 # seperate1 = time.time()
+                # start = time.perf_counter()
                 if start_predict_new_word[i] == 1:
                     temp_row = len(graph_scores[step, 0])
                     graph_scores[step, :(temp_row), :(temp_row - 1)] = -1
@@ -341,98 +356,27 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                         cond = graph_distance[topkrows, topkcols+1] == 0
                         graph_distance[topkrows, topkcols+1] = torch.where(cond, 10.0, 1.0) #(cond, 10.0, 1.0)
                         graph_distance[topkcols+1, topkrows] = 1
-                        degree_list[topkrows] += 1 #10
+                        degree_list[topkrows] += 10 #10
                         degree_list[topkcols+1] += 1
-                        father_tag[topkcols] = 1
+                        # father_tag[topkcols] = 1
                         graphinfo = Graphinfo.from_existing(degree_list, graph_distance, graph, father_tag)
                         # next_candidates.append((new_score, graphinfo, cache_k, cache_v, step_hiddens))
                         next_arcbeam.append((new_score, graphinfo, cache_k, cache_v, step_hiddens))
                 else:
                     next_arcbeam.append((temp_score[step], temp_beam[step][1], cache_k, cache_v, step_hiddens))
-                # logger.info("seperate time: {}".format(time.time() - seperate1))
-                    # import pdb;pdb.set_trace()
-                    # candidates = next_candidates
-                    # # new test setting
-                    # j = 0
-                    # next_step_beam = BEAM(scorebeamsize)
-                    # previous_beam = stepbeam.get_graphinfo()  #[(score, graphinfo),()]
-                    # for score, graphinfo, k, v, hidden in previous_beam:
-                    #     # action 1 choose it
-                    #     root_score = graph_scores[step][0, -1]
-                    #     new_score = score + torch.log(root_score).item()
-                    #     if next_step_beam.able_to_update(new_score):
-                    #         degree_list, graph_distance, graph, father_tag = graphinfo.get_info()
-                    #         # j point to next predict word
-                    #         graph[j, sent_index_to_id[i+1]] = 1
-                    #         graph[sent_index_to_id[i+1], j] = 1
-                    #         graph_distance[j, sent_index_to_id[i+1]] = 10 if graph_distance[j, sent_index_to_id[i+1]] == 0 else 1
-                    #         # graph_distance[j, sent_index_to_id[i+1]] = 10
-                    #         graph_distance[sent_index_to_id[i+1], j] = 1
-                    #         degree_list[j] += 10
-                    #         degree_list[sent_index_to_id[i+1]] += 1
-                    #         father_tag[sent_index_to_id[i+1] - 1] = 1
-                    #         new_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
-                    #         next_step_beam.update(new_score, next(counter), new_graphinfo, k, v, hidden)
-
-                    #     # action 2 don't choose it
-                    #     new_score = score + torch.log(1 - root_score).item()
-                    #     if next_step_beam.able_to_update(new_score):
-                    #         next_step_beam.update(new_score, next(counter), graphinfo, k, v, hidden)
-                    # stepbeam = next_step_beam
-
-                    # for j, (left_score, right_score) in enumerate(zip(graph_scores[step][1:-1, -1], graph_scores[step][-1, :-1])):
-                    #     next_step_beam = BEAM(scorebeamsize)
-                    #     previous_beam = stepbeam.get_graphinfo()  #[(score, graphinfo),()]
-                    #     for score, graphinfo, k, v, hidden in previous_beam:
-                    #         # action 1 left
-                    #         new_score = score + torch.log(left_score).item()
-                    #         if next_step_beam.able_to_update(new_score):
-                    #             degree_list, graph_distance, graph, father_tag = graphinfo.get_info()
-                    #             # j point to next predict word
-                    #             graph[j + 1, sent_index_to_id[i+1]] = 1
-                    #             graph[sent_index_to_id[i+1], j + 1] = 1
-                    #             # graph_distance[j + 1, sent_index_to_id[i+1]] = 10 if graph_distance[j + 1, sent_index_to_id[i+1]] == 0 else 1
-                    #             graph_distance[j + 1, sent_index_to_id[i+1]] = 10
-                    #             graph_distance[sent_index_to_id[i+1], j + 1] = 1
-                    #             degree_list[j + 1] += 10
-                    #             degree_list[sent_index_to_id[i+1]] += 1
-                    #             father_tag[sent_index_to_id[i+1] - 1] = 1
-                    #             new_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
-                    #             next_step_beam.update(new_score, next(counter), new_graphinfo, k, v, hidden)
-                            
-                    #         # action 2 right
-                    #         new_score = score + torch.log(right_score).item()
-                    #         if next_step_beam.able_to_update(new_score):
-                    #             degree_list, graph_distance, graph, father_tag = graphinfo.get_info()
-                    #             # next predict word point to j
-                    #             graph[j + 1, sent_index_to_id[i+1]] = 1
-                    #             graph[sent_index_to_id[i+1], j + 1] = 1
-                    #             graph_distance[j + 1, sent_index_to_id[i+1]] = 1
-                    #             # graph_distance[sent_index_to_id[i+1], j + 1] = 10 if graph_distance[sent_index_to_id[i+1], j + 1] == 0 else 1
-                    #             graph_distance[sent_index_to_id[i+1], j + 1] = 10
-                    #             degree_list[j + 1] += 1
-                    #             degree_list[sent_index_to_id[i+1]] += 10
-                    #             father_tag[j] = 1
-                    #             new_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
-                    #             next_step_beam.update(new_score, next(counter), new_graphinfo, k, v, hidden)
-
-                    #         # action 3 don't choose any
-                    #         new_score = score + torch.log(1 - left_score).item() + torch.log(1 - right_score).item()
-                    #         if next_step_beam.able_to_update(new_score):
-                    #             next_step_beam.update(new_score, next(counter), graphinfo, k, v, hidden)
-                    #     stepbeam = next_step_beam
-                # for score, graphinfo, k, v, hidden in stepbeam.get_graphinfo():
-                # for score, graphinfo, k, v, hidden in candidates:
-                #     # next_arcbeam.update(score, next(counter), graphinfo, k, v, hidden)
-                #     next_arcbeam.append((score, graphinfo, k, v, hidden))
+                # times4.append(time.perf_counter() - start)
                 one_beam_end = time.time()
             # logger.info("One beam time: {}".format(one_beam_end - one_beam_start))
+            # logger.info(f"prepare rel {sum(times1)}s")
+            # logger.info(f"update {sum(times4)}s")
             next_arcbeam.sort(key=lambda x: -x[0])
             next_arcbeam = next_arcbeam[:beamsize]
             step_score = -(np.max(temp_score) + np.log(np.sum(np.exp(temp_score - np.max(temp_score)))))
             scores.append(step_score)
             arcbeam = next_arcbeam
             # logger.info("one step time: {}".format(time.time() - start_time))
+        logger.info(f"total {time.time()-s1} s")
+        import pdb;pdb.set_trace()
     
     return scores, arcbeam
 
@@ -501,7 +445,7 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
                     all_v = [beam_kv[layer_idx][1] for beam_kv in beams_kv]
                     kv_cache.append((torch.cat(all_k, dim=0), torch.cat(all_v, dim=0)))
                 kv_cache = tuple(kv_cache)
-            outputs = model.generate(tokens[:, i:(i+1)].repeat(batch, 1), attn_relpos=attn_relpos, use_cache=True, return_dict=True, output_hidden_states=True, past_key_values=kv_cache)
+            outputs = model.generate(tokens[:, i:(i+1)].repeat(batch, 1), attn_relpos=attn_relpos.to(device), use_cache=True, return_dict=True, output_hidden_states=True, past_key_values=kv_cache)
             new_hiddens = torch.cat([outputs.hidden_states[-2], outputs.hidden_states[13]], dim=-1)
             kv_cache = outputs.past_key_values
             prob = outputs.logits.log_softmax(-1)
@@ -520,8 +464,7 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
                     step_hiddens = update_concat(step_pre_hiddens, predicate)
                     predicate_list.append(step_hiddens)
                 predicates = torch.stack(predicate_list).squeeze(1)
-                with torch.no_grad():
-                    graph_scores, arc_num_prob, _ = biaffine_model.inference(predicates, attn_relpos_for_pointer.to(device))
+                graph_scores, arc_num_prob, _ = biaffine_model.inference(predicates, attn_relpos_for_pointer.to(device))
                 graph_scores, arc_num_prob = graph_scores.cpu(), arc_num_prob.cpu()
             pointertime = time.time()
             # logger.info("Pointer time: {}".format(pointertime - transformerforward))

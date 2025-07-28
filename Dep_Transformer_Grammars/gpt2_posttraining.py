@@ -15,6 +15,7 @@ import os
 import json
 import csv
 import copy
+from torch.nn import CrossEntropyLoss
 from train_graphLayer import load_data, load_multiarrow, predicate_alignment
 from model_bllip_dep import calculate_depth, dijkstra, BiaffineAttention
 from helping_utils.logger import configure_logger, get_logger
@@ -39,8 +40,8 @@ def synchronize_arrows(input_id):
         sent_startofword = [vocab_size if startofword_id[word] == 1 else word for word in sent]
         count_num = 0
         for idx, word_id in enumerate(sent_startofword):
-            if sent[idx] == 0:
-                continue
+            # if sent[idx] == 0:
+            #     continue
             if word_id == bos_eos_id:
                 sent_id.append(-1)
             elif word_id == vocab_size:
@@ -767,7 +768,7 @@ if __name__ == "__main__":
     dev_arrow_path = "../data_process/GPT2-tokenizer/BLLIP_GPT2_DEV_psd_multiarrow.txt"
     test_arrow_path = "../data_process/GPT2-tokenizer/BLLIP_GPT2_TEST_psd_multiarrow.txt"
 
-    train_data = load_data(train_path, batchsize=train_bz, seed=seed, shuffle=True)
+    train_data = load_data(train_path, batchsize=train_bz, seed=seed, shuffle=True, size="demo")
     test_data = load_data(test_path, batchsize=8, seed=seed, shuffle=False)
     dev_data = load_data(dev_path, batchsize=8, seed=seed, shuffle=False)
 
@@ -784,7 +785,7 @@ if __name__ == "__main__":
     else:
         model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
         biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
-        left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz, shuffle=True, seed=seed)
+        left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz, shuffle=True, seed=seed, size="demo")
         left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=8, shuffle=False, seed=seed)
         left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=8, shuffle=False, seed=seed)
         biaffine_model = biaffine_model.to(device)

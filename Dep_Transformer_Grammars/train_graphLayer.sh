@@ -3,14 +3,15 @@
 #SBATCH -c 1
 #SBATCH --mem=1M
 #SBATCH -G 1
-#SBATCH --output=GiLT_large_psd_4_3mixing_easydepth_-distance.out
+#SBATCH --output=GiLT_small_psd_4_3mixing_easydepth_9add15_600out_SwiGLU_ffllama2_ln.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 export DATASET=psd
-export DATASIZE=large
+export DATASIZE=small
 export RELTYPE=mixing
 export LOSSRATIO=0.2
+export MIXING_NUM=3
 
 python train_graphLayer.py \
     --train_file  ../data_process/token_level/BLLIP_LG_TRAIN_SPM_TOK.csv \
@@ -19,12 +20,10 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
     --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_-distance.txt \
+    --log_file logs/log_GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_9add15_600out_SwiGLU_ffllama2.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_-distance.pt \
-    --tape_train_file ../data_process/ACE_arrow/TRAIN_psd_tape_normal_degree \
-    --tape_dev_file ../data_process/ACE_arrow/DEV_psd_tape_normal_degree \
-    --tape_test_file ../data_process/ACE_arrow/TEST_psd_tape_normal_degree \
+    --save_path models/GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_9add15_600out_SwiGLU_ffllama2.pt \
+    --mixing_num $MIXING_NUM \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \

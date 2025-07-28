@@ -57,6 +57,7 @@ if __name__ == "__main__":
     biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
     biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
     test_data = load_data(args.parse_file_path, batchsize=1, shuffle=False)
+    configure_logger("logs/GiLT_gpt2_parse.log")
 
     beamsize = args.beamsize
     scorebeamsize = args.scorebeamsize

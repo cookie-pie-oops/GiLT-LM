@@ -4,7 +4,8 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from transformers import AdamW, get_linear_schedule_with_warmup
 from model_bllip_dep import BiaffineAttention
-from train_graphLayer import predicate_alignment, load_STS_score
+from train_graphLayer import predicate_alignment, load_STS_score, load_multiarrow
+from gpt2_posttraining import GiLTGPT2LMHead
 import os
 import json
 import csv
@@ -40,7 +41,7 @@ def load_data(path, batchsize=-1, shuffle=False, seed=1111, size="default"):
         return [sents[i:i+batchsize] for i in range(0, len(sents), batchsize)]
 
 
-def eval(model, eval_data, tokenizer, eos_string, downstreamtask, write_file=False, eval_score=None):
+def eval(model, eval_data, tokenizer, eos_string, downstreamtask, write_file=False, eval_score=None, arrows=None):
     if downstreamtask == "STS":
         STS_out = []
         STS_label = []
@@ -69,7 +70,10 @@ def eval(model, eval_data, tokenizer, eos_string, downstreamtask, write_file=Fal
         eval_inps = eval_inps.to(device)
         eval_tgts = eval_tgts.to(device)
         
-        outputs = model(eval_inps, labels=eval_inps, output_hidden_states=True)
+        if arrows is None:
+            outputs = model(eval_inps, labels=eval_inps, output_hidden_states=True)
+        else:
+            outputs, attn_relpos_for_pointer, sents_index_to_id = model(eval_inps, output_hidden_states=True, arrows=[arrows[0][idx], arrows[1][idx]])
         if downstreamtask != "STS":
             index = [len(eval_idx) - 3 if eval_idx[len(eval_idx) - 3] == 25 else len(eval_idx) - 4 for eval_idx in eval_idxs]
             prediction = torch.argmax(outputs.logits, dim=-1)[torch.arange(len(eval_idxs)), index]
@@ -112,7 +116,7 @@ def eval(model, eval_data, tokenizer, eos_string, downstreamtask, write_file=Fal
         out_metric["spearman"] = spearman
 
     if write_file:
-        fw = open(f"outputs/test_{downstreamtask}.tsv", 'w')
+        fw = open(f"outputs/GiLT_test_{downstreamtask}.tsv", 'w')
         writer = csv.writer(fw, delimiter="\t")
         writer.writerows(head_data)
     model.train()
@@ -128,27 +132,55 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    downstreamtask = "STS"
+    downstreamtask = os.getenv('TASK')
+    is_GiLT = True
+    accumulate_step = 8
+    eval_batch_size = 4
     train_bz_dict = {"SST2":64, "RTE":32, "STS":64, "MRPC":64}
     epoch_dict = {"SST2":5, "RTE":10, "STS":20, "MRPC":15}
     eval_interval_dict = {"SST2":100, "RTE":40, "STS":80, "MRPC":40}
+    train_bz_dict[downstreamtask] = train_bz_dict[downstreamtask] // accumulate_step if is_GiLT else train_bz_dict[downstreamtask]
+    eval_interval_dict[downstreamtask] = eval_interval_dict[downstreamtask] * accumulate_step if is_GiLT else eval_interval_dict[downstreamtask]
+    log_interval = (20 * accumulate_step) if is_GiLT else 20
     LR_dict = {"SST2":7.5e-6, "RTE":3.75e-6, "STS":7.5e-6, "MRPC":7.5e-6}   # SST2 3e-6
     train_path = f"/home/huangty/SDP_Transformer_project/data_process/{downstreamtask}/{downstreamtask}_TRAIN.txt"
     test_path = f"/home/huangty/SDP_Transformer_project/data_process/{downstreamtask}/{downstreamtask}_TEST.txt"
     dev_path = f"/home/huangty/SDP_Transformer_project/data_process/{downstreamtask}/{downstreamtask}_DEV.txt"
 
+    train_arrow_path = f"../data_process/{downstreamtask}/{downstreamtask}_parse_train_multiarrow.txt"
+    dev_arrow_path = f"../data_process/{downstreamtask}/{downstreamtask}_parse_dev_multiarrow.txt"
+    test_arrow_path = f"../data_process/{downstreamtask}/{downstreamtask}_parse_test_multiarrow.txt"
+
     train_data = load_data(train_path, batchsize=train_bz_dict[downstreamtask], seed=seed, shuffle=True)
-    test_data = load_data(test_path, batchsize=8, seed=seed, shuffle=False)
-    dev_data = load_data(dev_path, batchsize=8, seed=seed, shuffle=False)
+    test_data = load_data(test_path, batchsize=eval_batch_size, seed=seed, shuffle=False)
+    dev_data = load_data(dev_path, batchsize=eval_batch_size, seed=seed, shuffle=False)
 
     tokenizer = GPT2Tokenizer.from_pretrained("/home/huangty/GPT2/medium355M")
     tokenizer.add_prefix_space = True
-    model = GPT2LMHeadModel.from_pretrained("/home/huangty/GPT2/medium355M") # output_hidden_states=True
-    model.load_state_dict(torch.load('models/gpt2_medium_post.pt', map_location=device))
+    EPOCHS = epoch_dict[downstreamtask]
+    LEARNING_RATE = LR_dict[downstreamtask]
+    configure_logger(f"logs/GiLT_gpt2_finetune_{downstreamtask}.log")
+    logger = get_logger()
+    if not is_GiLT:
+        model = GPT2LMHeadModel.from_pretrained("/home/huangty/GPT2/medium355M") # output_hidden_states=True
+        model.load_state_dict(torch.load('models/gpt2_medium_post.pt', map_location=device))
+    else:
+        biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
+        left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz_dict[downstreamtask], shuffle=True, seed=seed)
+        left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
+        left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
+        model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
+        model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post.pt", map_location=device))
+        biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
+        biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
+        biaffine_model = biaffine_model.to(device)
+        biaffine_model.train()
+        biaffine_optimizer = AdamW(biaffine_model.parameters(), lr=LEARNING_RATE)
     eos_string = tokenizer.eos_token
     bos_string = tokenizer.bos_token
     bos_eos_id = 50256
-
+    dev_sts_score = None
+    test_sts_score = None
     if downstreamtask == "STS":
         sts_train_path = "../data_process/STS/STS_TRAIN_score.txt"
         sts_dev_path = "../data_process/STS/STS_DEV_score.txt"
@@ -158,14 +190,12 @@ if __name__ == "__main__":
         test_sts_score = load_STS_score(sts_test_path, batchsize=8, shuffle=False, seed=seed)
         model.STS = torch.nn.Linear(1024, 1)
 
-    EPOCHS = epoch_dict[downstreamtask]
-    LEARNING_RATE = LR_dict[downstreamtask]
-    configure_logger(f"logs/gpt2_finetune_{downstreamtask}.log")
-    logger = get_logger()
-
     model = model.to(device)
     model.train()
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+    if is_GiLT:
+        optimizer.zero_grad()
+        biaffine_optimizer.zero_grad()
     cs_loss = torch.nn.CrossEntropyLoss(ignore_index=-1, reduction='none')
     mse_loss = torch.nn.MSELoss(reduction='none')
     logger.info(f"Task {downstreamtask}")
@@ -187,8 +217,12 @@ if __name__ == "__main__":
             train_inps = train_inps.to(device)
             train_tgts = train_tgts.to(device)
             # <bos> and <eos> are both 50256
-                
-            outputs = model(train_inps, labels=train_inps, output_hidden_states=True)
+
+            if not is_GiLT:    
+                outputs = model(train_inps, labels=train_inps, output_hidden_states=True)
+            else:
+                train_arrows = [left_train_arrow[idx], right_train_arrow[idx]]
+                outputs, attn_relpos_for_pointer, sents_index_to_id = model(train_inps, arrows=train_arrows, output_hidden_states=True)
             if downstreamtask != "STS":
                 loss = cs_loss(outputs.logits.permute(0,2,1), train_tgts)
                 index = [len(train_idx) - 3 if train_idx[len(train_idx) - 3] == 25 else len(train_idx) - 4 for train_idx in train_idxs]
@@ -196,21 +230,36 @@ if __name__ == "__main__":
             else:
                 loss = mse_loss(model.STS(outputs.hidden_states[-1][:, -1, :]), torch.tensor(train_sts_score[idx], device=device).unsqueeze(1)).sum()
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            # torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), 3.0)
-            optimizer.step()
+            if is_GiLT:
+                loss.backward()
+                if (step_count + 1) % accumulate_step == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+                    # torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), 3.0)
+                    # biaffine_optimizer.step()
+                    # biaffine_scheduler.step()
+                    optimizer.step()
+                    # scheduler.step()
+                    optimizer.zero_grad()
+                    # biaffine_optimizer.zero_grad()
+            else:
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+                # torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), 3.0)
+                optimizer.step()
             sum_loss = sum_loss + loss.item()
 
             step_count += 1
-            if step_count % 20 == 0:
+            if step_count % log_interval == 0:
                 logger.info(f"Epoch {epoch+1} Step {step_count} / {len(train_data) * EPOCHS}, loss {sum_loss / 20:.4f}")
                 sum_loss = 0.0
 
             if step_count % eval_interval_dict[downstreamtask] == 0 or step_count == len(train_data) * EPOCHS:
                 # test on dev
-                dev_metric_dict = eval(model, dev_data, tokenizer, eos_string, downstreamtask, eval_score=dev_sts_score)
+                if not is_GiLT:
+                    dev_metric_dict = eval(model, dev_data, tokenizer, eos_string, downstreamtask, eval_score=dev_sts_score)
+                else:
+                    dev_metric_dict = eval(model, dev_data, tokenizer, eos_string, downstreamtask, eval_score=dev_sts_score, arrows=[left_dev_arrow, right_dev_arrow])
                 if downstreamtask == "MRPC":
                     dev_metric = dev_metric_dict["f1"]
                 elif downstreamtask == "STS":
@@ -221,12 +270,15 @@ if __name__ == "__main__":
                     logger.info(f"Dev {key}: {value}")
                 if dev_metric > best_metric:
                     best_metric = dev_metric
-                    test_metric_dict = eval(model, test_data, tokenizer, eos_string, downstreamtask, True, eval_score=test_sts_score)
+                    if not is_GiLT:
+                        test_metric_dict = eval(model, test_data, tokenizer, eos_string, downstreamtask, True, eval_score=test_sts_score)
+                    else:
+                        test_metric_dict = eval(model, test_data, tokenizer, eos_string, downstreamtask, True, eval_score=test_sts_score, arrows=[left_test_arrow, right_test_arrow])
                     for key, value in test_metric_dict.items():
                         logger.info(f"Test {key}: {value}")
-                    torch.save(model.state_dict(), os.path.join(f"models/gpt2_medium_{downstreamtask}.pt"))
+                    torch.save(model.state_dict(), os.path.join(f"models/GiLT_gpt2_medium_{downstreamtask}.pt"))
     
     logger.info(f"Best metric: {best_metric}")
     for key, value in test_metric_dict.items():
         logger.info(f"Test {key}: {value}")
-    logger.info(f"New model saved at models/gpt2_medium_{downstreamtask}.pt")
+    logger.info(f"New model saved at models/GiLT_gpt2_medium_{downstreamtask}.pt")
