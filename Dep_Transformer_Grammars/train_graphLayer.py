@@ -9,7 +9,6 @@ import logging
 import time
 import json
 from torch import cuda
-from torch.cuda.amp import autocast, GradScaler
 from helping_utils.logger import configure_logger, get_logger
 import model_bllip_dep
 from model_bllip_dep import TransformerGrammar, BiaffineAttention, find_label_idx
@@ -86,6 +85,8 @@ parser.add_argument('--sts_dev_path', default=None)
 parser.add_argument('--sts_test_path', default=None)
 parser.add_argument('--write_test_output', default=None)
 parser.add_argument('--mixing_num', default=3, type=int)
+parser.add_argument('--biaffine_head', default=1, type=int)
+parser.add_argument('--biaffine_out_dim', default=1024, type=int)
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
@@ -535,7 +536,7 @@ def eval(data, index_to_id, left_arrow, right_arrow, startofword, model,
 
                             # inv_left_labels = mask - left_labels
                             # inv_right_labels = mask - right_labels
-                            scores, logits, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
+                            scores, logits, arc_prob, arc_logits = biaffine_model.multihead_forward(torch.stack(predicates_input).unsqueeze(0), sent_attn_relpos.unsqueeze(1))
                             # right_logits = right_biaffine_model(input1, input2, sent_attn_relpos).squeeze()
                             labels = labels[:,1:].unsqueeze(0)
                             arc_num_labels = arc_num_labels.long().unsqueeze(0)
@@ -715,7 +716,7 @@ def main(args):
                                    args.num_layers, args.dropout, args.dropoutatt, pad_id, bos_id,
                                    eos_id, left_arc, right_arc, left_arc2, right_arc2, startofword_id,
                                    args.pre_lnorm, args.rel_type)
-        biaffine_model = BiaffineAttention(args.d_inner, args.w_dim, type="Multi")
+        biaffine_model = BiaffineAttention(args.biaffine_out_dim, args.w_dim, n_head=args.biaffine_head, type="Multi")
         logger.info(f"Transformer parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in biaffine_model.parameters())}")
         model.apply(weights_init)
@@ -733,7 +734,7 @@ def main(args):
             # right_biaffine_model = checkpoint['right_biaffine_model']
             logger.info("Load exist biaffine model")
         else:
-            biaffine_model = BiaffineAttention(args.d_inner, args.w_dim, type="Multi")
+            biaffine_model = BiaffineAttention(args.biaffine_out_dim, args.w_dim, n_head=args.biaffine_head, type="Multi")
             # right_biaffine_model = BiaffineAttention(args.w_dim, args.proj_dim, type="Multi")
         model = checkpoint['model']
         if args.finetune is not None:
@@ -745,7 +746,7 @@ def main(args):
             model = new_model
         logger.info(f"model parameter counts: {sum(p.numel() for p in model.parameters())}")
         logger.info(f"biaffine model parameter counts: {sum(p.numel() for p in biaffine_model.parameters())}")
-    args.BTloss_ratio = sum(p.numel() for p in biaffine_model.parameters()) / sum(p.numel() for p in model.parameters())    # loss ratio
+    # args.BTloss_ratio = sum(p.numel() for p in biaffine_model.parameters()) / sum(p.numel() for p in model.parameters())    # loss ratio
     logger.info(f"updated btloss ratio: {args.BTloss_ratio:.4f}")
     nonemb_params = [p for p in model.parameters() if p.size() != (vocab_size, args.w_dim)]
     nonemb_params.extend([p for p in biaffine_model.parameters()])
@@ -892,7 +893,6 @@ def main(args):
     else:
         checkpoint_step = 0
     mseloss = nn.MSELoss(reduction='none')
-    scaler = GradScaler(init_scale=2**20)
     for epoch in range(args.num_epochs):
         logger.info(f"epoch {epoch+1}")
         num_words = 0
@@ -1005,10 +1005,18 @@ def main(args):
 
                             labels = (labels[:,1:]).unsqueeze(0).to(device)
                             arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
-                            scores, logits, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
+                            scores, logits, arc_prob, arc_logits = biaffine_model.multihead_forward(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
                             # _, _, _ = biaffine_model.inference(torch.stack(predicates_input)[:3].unsqueeze(0), attn_rel[:, 2,:3].unsqueeze(1))
-                            loss = crit(logits, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            edge_loss = crit(logits, labels).sum()
+                            action_loss = crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            action_times = 1
+                            with torch.no_grad():
+                                loss_obj = edge_loss.item() + action_loss.item()
+                                loss_value = edge_loss.item() + action_times * action_loss.item()
+                                scalar = loss_obj / loss_value
+                            loss = (edge_loss + action_times * action_loss) * scalar
                             biaffine_loss.append(loss)
+                            train_biaffine_loss += loss_obj
                     
                     # batched_predicate = torch.stack(batched_predicate).to(device)
                     # batched_label = torch.stack(batched_label).to(device)
@@ -1041,15 +1049,14 @@ def main(args):
                     loss = 2 * (1/(1+args.BTloss_ratio) * raw_loss.mean() + 2 * args.BTloss_ratio/(1+args.BTloss_ratio) * raw_biaffine_loss.mean())
                 else:   # dynamic -1
                     loss = 2 * (1/(1+BTloss_ratio_list[train_step]) * raw_loss.mean() + 2 * BTloss_ratio_list[train_step]/(1+BTloss_ratio_list[train_step]) * raw_biaffine_loss.mean())
-                train_biaffine_loss += raw_biaffine_loss.sum().item()
+                # train_biaffine_loss += raw_biaffine_loss.sum().item()
             else:
                 loss = raw_loss.mean()
             train_loss += raw_loss.sum().item()
             # raw_biaffine_loss = torch.stack(biaffine_loss) # biaffineonly
             # loss = raw_biaffine_loss.mean()
             # train_loss += raw_biaffine_loss.sum().item()
-
-            scaler.scale(loss).backward()
+            loss.backward()
             backward_time = time.time()
             # logger.info(f"Backward takes {backward_time-biaffine_end:.4f} seconds")
            
@@ -1072,11 +1079,9 @@ def main(args):
             # logger.info(f"Step {train_step + 1} Transformer Gradient Norm: {total_norm:.4f}")
             
             if args.max_grad_norm > 0:
-                scaler.unscale_(optimizer)  
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), args.max_grad_norm)
-            scaler.step(optimizer)
-            # logger.info(f"scale:{scaler.get_scale()}, lr:{optimizer.param_groups[0]['lr']}, loss:{loss.item()}")
+            optimizer.step()
             train_step += 1
             if args.scheduler == 'const':
                 pass
@@ -1088,7 +1093,6 @@ def main(args):
                 else:
                     for j in range(len(optimizer.param_groups)):
                         optimizer.param_groups[j]['lr'] = args.stable_lr
-            scaler.update()
             num_words += total_length
             num_sents += batch_size
 

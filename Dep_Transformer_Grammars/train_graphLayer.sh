@@ -3,12 +3,12 @@
 #SBATCH -c 1
 #SBATCH --mem=1M
 #SBATCH -G 1
-#SBATCH --output=GiLT_small_psd_4_3mixing_easydepth_9add15_600out_SwiGLU_ffllama2_ln.out
+#SBATCH --output=GiLT_large_psd_4_3mixing_easydepth_4096inner_2048out_multiheadforward_8head.out
 
 # --model_file models/graphlayer_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_$RELTYPE\_DTG.pt \
 
 export DATASET=psd
-export DATASIZE=small
+export DATASIZE=large
 export RELTYPE=mixing
 export LOSSRATIO=0.2
 export MIXING_NUM=3
@@ -20,13 +20,15 @@ python train_graphLayer.py \
     --train_arrow_file ../data_process/ACE_arrow/TRAIN_$DATASET\_ACE_multiarrow.txt \
     --dev_arrow_file ../data_process/ACE_arrow/DEV_$DATASET\_ACE_multiarrow.txt \
     --test_arrow_file ../data_process/ACE_arrow/TEST_$DATASET\_ACE_multiarrow.txt \
-    --log_file logs/log_GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_9add15_600out_SwiGLU_ffllama2.txt \
+    --log_file logs/log_GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_4096inner_2048out_multiheadforward_8head.txt \
     --vocab_file ../data_process/spm_parsing/BLLIP_spm.vocab \
-    --save_path models/GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_9add15_600out_SwiGLU_ffllama2.pt \
+    --save_path models/GiLT_$DATASIZE\_$DATASET\_4_1:$LOSSRATIO\_3$RELTYPE\_easydepth_4096inner_2048out_multiheadforward_8head.pt \
     --mixing_num $MIXING_NUM \
     --rel_type $RELTYPE \
     --BTloss_ratio $LOSSRATIO \
     --dataset $DATASIZE \
+    --biaffine_head 8 \
+    --biaffine_out_dim 2048 \
     --attn_mask graphlayer \
     --sentence_level \
     --emb_lr_multiplier 1.0 \
