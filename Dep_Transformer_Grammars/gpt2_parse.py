@@ -24,14 +24,10 @@ from gpt2_posttraining import synchronize_arrows, GiLTGPT2LMHead, startofword_id
 from beam_search_utils import GiLT_GPT2_update_beam, get_best_graph, get_action_from_graph
 logger = get_logger()
 
-def load_data(filename, batchsize=8, shuffle=True):
+def load_data(filename, batchsize=8):
 
     with open(filename, 'r') as f:
         sents = [line.strip() for line in f.readlines()]
-    
-    if shuffle:
-        np.random.seed(seed)
-        np.random.shuffle(sents)
     
     if batchsize == -1:
         return [sents]
@@ -56,7 +52,7 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post.pt", map_location=device))
     biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
     biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
-    test_data = load_data(args.parse_file_path, batchsize=1, shuffle=False)
+    test_data = load_data(args.parse_file_path, batchsize=1)
     configure_logger("logs/GiLT_gpt2_parse.log")
 
     beamsize = args.beamsize

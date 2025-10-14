@@ -6,21 +6,21 @@
 # ../data_process/RTE/RTE_TRAIN_token_parse.txt \
 # ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
 
-# python BLLIP_beam_search.py \
-#     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-#     --model_path models/GiLT_large_psd_4_1:0.2_3mixing_easydepth_-distance.pt \
-#     --beamsize 1 \
-#     --scorebeamsize 1 \
-#     --parse_file ../data_process/RTE/RTE_TRAIN_psd_multiarrow_parse.txt \
-#     --finetuneset rte
-
-python -m memory_profiler BLLIP_beam_search.py \
+python BLLIP_beam_search.py \
     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
-    --model_path models/GiLT_small_psd_4_1:0.2_3mixing_easydepth_fast_biaffine_AugmentedQ_oriarc.pt \
+    --model_path models/GiLT_large_psd_4_1:0.2_mixing_-pred.pt \
     --beamsize 300 \
-    --scorebeamsize 20 \
-    --parse_file ../data_process/RTE/RTE_TEST_psd_multiarrow_parse.txt \
+    --scorebeamsize 5 \
+    --parse_file ../data_process/RTE/RTE_TRAIN_psd_multiarrow_parse.txt \
     --finetuneset rte
+
+# python -m memory_profiler BLLIP_beam_search.py \
+#     --test_file ../data_process/token_level/BLLIP_LG_TEST_SPM_TOK.csv \
+#     --model_path models/GiLT_small_psd_4_1:0.2_3mixing_easydepth_fast_biaffine_AugmentedQ_oriarc.pt \
+#     --beamsize 300 \
+#     --scorebeamsize 20 \
+#     --parse_file ../data_process/RTE/RTE_TEST_psd_multiarrow_parse.txt \
+#     --finetuneset rte
 
 # python BLLIP_beam_search.py \
 #     --test_file ../data_process/RTE/RTE_DEV_token_parse.txt \

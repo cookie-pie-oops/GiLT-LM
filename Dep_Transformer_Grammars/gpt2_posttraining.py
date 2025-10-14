@@ -804,6 +804,7 @@ if __name__ == "__main__":
     logger.info(f"Learning rate: {LEARNING_RATE}")
     logger.info(f"Weight decay: {WEIGHT_DECAY}")
     save_path = os.path.join("models/GiLT_gpt2_medium_post.pt")
+    biaffine_save_path = os.path.join("models/GiLT_gpt2_biaffine.pt")
 
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -918,7 +919,7 @@ if __name__ == "__main__":
                         test_ppl = eval(model, test_data, is_GiLT)
                     else:
                         test_ppl = eval(model, test_data, is_GiLT, left_test_arrow, right_test_arrow, biaffine_model)
-                        torch.save(biaffine_model.state_dict(), "models/GiLT_gpt2_biaffine.pt")
+                        torch.save(biaffine_model.state_dict(), biaffine_save_path)
                     best_test_ppl = test_ppl
                     logger.info(f"Test PPL: {test_ppl}, best so far.")
                     torch.save(model.state_dict(), save_path)

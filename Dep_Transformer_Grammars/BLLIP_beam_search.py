@@ -71,11 +71,11 @@ if __name__ == "__main__":
     total_ppl = 0
     total_len = 0
     start_time = time.time()
-    for idx in tqdm(range(len(test_data))): #[:8]
+    for idx in range(len(test_data)): #[:8]
         encoded = test_data[idx][0]
-        # if idx <= 2162:
+        # if idx <= 985:
         #     total_len += len(encoded) - 1
-        #     total_ppl = np.log(14.521231167495714) * total_len
+        #     total_ppl = np.log(13.131356547686522) * total_len
         #     continue
         start_predict_new_word = [1 if startofword_id[encoded[i + 1]] else 0 for i in range(len(encoded) - 1)]
         sent_index_to_id = test_index_to_id[idx][0]
@@ -109,8 +109,9 @@ if __name__ == "__main__":
             fw.write(json.dumps(arrow_dict, ensure_ascii=False)+'\n')
         total_ppl += scores[-1]
         total_len += len(encoded) - 1
-        logger.info(f"sentence {idx + 1} ppl: {np.exp(scores[-1] / (len(encoded) - 1))}")
-        logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
+        if (idx + 1) % 20 == 0:
+            logger.info(f"sentence {idx + 1} ppl: {np.exp(scores[-1] / (len(encoded) - 1))}")
+            logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
     end_time = time.time()
     logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
     logger.info(f"tokens per second: {total_len / (end_time - start_time)} tokens/s")

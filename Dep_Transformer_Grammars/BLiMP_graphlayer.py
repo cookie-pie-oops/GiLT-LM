@@ -75,7 +75,7 @@ if __name__ == "__main__":
         # sample_list = random.sample(sample_list, int(len(sample_list) / 10))
         logger.info(file[:-6])
         acc = 0.0
-        for idx in tqdm(range(len(sample_list))):
+        for idx in range(len(sample_list)):
             examples = {"sentence_good": sample_list[idx]["sentence_good"], "sentence_bad": sample_list[idx]["sentence_bad"]}
             phen2surprisals = {}
             for phen in examples:

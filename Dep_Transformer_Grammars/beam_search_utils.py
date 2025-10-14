@@ -232,8 +232,8 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
         arcbeam.append((0.0, init_graphinfo, None, None, None))
 
         s1 = time.time()
-        model_bllip_dep.mixing_num = 3
-        attn_relpos = torch.zeros(model_bllip_dep.mixing_num, 1, 1, 1).long().to(device)  #ablation
+        model_bllip_dep.mixing_num = 3 # ablation
+        attn_relpos = torch.zeros(model_bllip_dep.mixing_num, 1, 1, 1).long().to(device)  
         for i in range(tokens.shape[1]):
             times1 = []
             times4 = []
@@ -244,8 +244,8 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
             temp_score = [tup[0] for tup in temp_beam]
             batch = len(arcbeam)
             mask_size = i + 1
-            attn_relpos_for_pointer = torch.zeros(model_bllip_dep.mixing_num, batch, max(sent_index_to_id[i], 0) + 1).long().to(device)  #ablation
-            degree_index, depth_index, distance_index, pred_depth_index = 0, 1, 2, 3  #ablation
+            attn_relpos_for_pointer = torch.zeros(model_bllip_dep.mixing_num, batch, max(sent_index_to_id[i], 0) + 1).long().to(device)
+            depth_index = 1  # ablation
             attn_relpos_for_pointer[depth_index, :, 0] = 1 # root always depth 1
             length = max(sent_index_to_id[i], 0) + 1
             if sent_index_to_id[i] != -1:
@@ -256,8 +256,9 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                     new_graph = graph[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1].numpy().tolist()
                     depth_list = calculate_depth(new_graph)
                     distance_list = dijkstra_heap(new_graph_distance, sent_index_to_id[i])  # graph_distance
-                    attn_relpos_for_pointer[:, step, :length] = torch.tensor([degree_list[:length].numpy().tolist(), depth_list, distance_list], dtype=attn_relpos_for_pointer.dtype, device=device)
-                idx = id_to_index[:mask_size].view(1, 1, -1).repeat(3, batch, 1)
+                    attn_relpos_for_pointer[:, step, :length] = torch.tensor([degree_list[:length].numpy().tolist(), depth_list, distance_list], dtype=attn_relpos_for_pointer.dtype, device=device) # ablation
+                    # attn_relpos_for_pointer[:, step, :length] = torch.tensor([depth_list, distance_list], dtype=attn_relpos_for_pointer.dtype, device=device)
+                idx = id_to_index[:mask_size].view(1, 1, -1).repeat(model_bllip_dep.mixing_num, batch, 1)
                 attn_relpos = attn_relpos_for_pointer.gather(dim=-1, index=idx).unsqueeze(2)
                 attn_relpos[:, :, :, 0] = 0
 
@@ -287,7 +288,7 @@ def update_beam(encoded, model, biaffine_model, start_predict_new_word, sent_ind
                     predicate_list.append(step_hiddens)
                 predicates = torch.stack(predicate_list).squeeze(1)
                 # with torch.cuda.amp.autocast(dtype=torch.float16):
-                graph_scores, arc_num_prob, _ = biaffine_model.multihead_inference(predicates, attn_relpos_for_pointer)
+                graph_scores, arc_num_prob, _ = biaffine_model.inference(predicates, attn_relpos_for_pointer)
                 graph_scores, arc_num_prob = graph_scores.cpu(), arc_num_prob.cpu()
             pointertime = time.time()
             # logger.info("Pointer time: {}".format(pointertime - transformerforward))
@@ -382,6 +383,8 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
         init_graphinfo = Graphinfo(degree_list, graph_distance, graph, father_tag)
         # arcbeam.update(0.0, next(counter), init_graphinfo, None, None, None)    #init
         arcbeam.append((0.0, init_graphinfo, None, None, None))
+        
+        attn_relpos = torch.zeros(3, 1, 1, 1).long().to(device)
         for i in range(tokens.shape[1]):
             # get temp beam
             start_time = time.time()
@@ -394,24 +397,19 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
             attn_relpos_for_pointer = torch.zeros(3, batch, max(sent_index_to_id[i], 0) + 1).long()
             degree_index, depth_index, distance_index = 0, 1, 2
             attn_relpos_for_pointer[depth_index, :, 0] = 1 # root always depth 1
-            for step, (step_score, step_graphinfo, pre_k, pre_v, pre_hiddens) in enumerate(temp_beam):
-                degree_list, graph_distance, graph, father_tag = step_graphinfo.get_info()
-                if sent_index_to_id[i] != -1:
-                    depth_list = calculate_depth(graph[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1])
-                    distance_list = dijkstra(graph_distance[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1], sent_index_to_id[i])  # graph_distance
-                    for id in range(len(attn_relpos_for_pointer[degree_index, step])):
-                        attn_relpos_for_pointer[degree_index, step, id] = degree_list[id]  # previous step graph
-                    for id in range(len(attn_relpos_for_pointer[depth_index, step])):
-                        attn_relpos_for_pointer[depth_index, step, id] = depth_list[id]
-                    for id in range(len(attn_relpos_for_pointer[distance_index, step])):
-                        attn_relpos_for_pointer[distance_index, step, id] = distance_list[id]
-                    
-                    for id, degree_value in enumerate(degree_list[1:]):
-                        attn_relpos[degree_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = degree_value.item()
-                    for id, depth_value in enumerate(depth_list[1:]):
-                        attn_relpos[depth_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = depth_value
-                    for id, distance_value in enumerate(distance_list[1:]):
-                        attn_relpos[distance_index, step, 0, [idx for idx in id_to_index[id + 1] if idx < mask_size]] = distance_value
+            length = max(sent_index_to_id[i], 0) + 1
+            if sent_index_to_id[i] != -1:
+                for step, (step_score, step_graphinfo, pre_k, pre_v, pre_hiddens) in enumerate(temp_beam):
+                    degree_list, graph_distance, graph, father_tag = step_graphinfo.get_info()
+                    # start = time.perf_counter()
+                    new_graph_distance = graph_distance[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1].numpy().tolist()
+                    new_graph = graph[:sent_index_to_id[i] + 1, :sent_index_to_id[i] + 1].numpy().tolist()
+                    depth_list = calculate_depth(new_graph)
+                    distance_list = dijkstra_heap(new_graph_distance, sent_index_to_id[i])  # graph_distance
+                    attn_relpos_for_pointer[:, step, :length] = torch.tensor([degree_list[:length].numpy().tolist(), depth_list, distance_list], dtype=attn_relpos_for_pointer.dtype, device=device)
+                idx = id_to_index[:mask_size].view(1, 1, -1).repeat(3, batch, 1)
+                attn_relpos = attn_relpos_for_pointer.gather(dim=-1, index=idx).unsqueeze(2)
+                attn_relpos[:, :, :, 0] = 0
             if i == 0:
                 kv_cache = None
             else:

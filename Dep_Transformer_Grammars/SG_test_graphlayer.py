@@ -154,7 +154,7 @@ if __name__ == "__main__":
             suite_type = "agreement"
         else:
             suite_type = "Other"
-        for idx in tqdm(range(len(test_suite_parser.meta_data["data"]))):
+        for idx in range(len(test_suite_parser.meta_data["data"])):
             examples = test_suite_parser.get_example(idx)
             phen2surprisals = {}
             for phen in examples:
@@ -199,11 +199,13 @@ if __name__ == "__main__":
             extracted_formula = test_suite_parser.extract_formulas(phen2surprisals)
             test_suite_parser.answers[idx] = extracted_formula
         acc = 0.0
+        res_list = []
         for formula in test_suite_parser.answers:
             answer = eval_math_expr(formula)
-            logger.info(f"score: {answer}")
+            res_list.append(str(answer))
             acc += answer
-        
+        logger.info(f"{('|').join(res_list)}")
+
         logger.info(f"correct rate: {acc / len(test_suite_parser.answers)}")
         final_acc.append(acc / len(test_suite_parser.answers))
         logger.info(f"mean correct rate up to now: {np.mean(final_acc)}")

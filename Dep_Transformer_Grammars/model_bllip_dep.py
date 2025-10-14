@@ -6,55 +6,12 @@ from torch import nn
 import torch.nn.functional as F
 import numpy as np
 import math
-# from masking_bllip import utils as masking_utils
-# from masking_bllip import masking_types as types
 import time
+import os
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
 
 mixing_num = 2 # ablation
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
-
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
-    freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
-
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 def find_label_idx(sent, prefix):
     main_str = ",".join(map(str, sent))
@@ -63,114 +20,6 @@ def find_label_idx(sent, prefix):
     if idx == -1:
         return -1
     return main_str[:idx].count(",") if idx != 0 else 0
-
-class FF_llama(nn.Module):
-    def __init__(self, d_model, d_inner):
-        super(FF_llama, self).__init__()
-        d_inner = int(2 * d_inner / 3)
-
-        self.w1 = nn.Linear(d_model, d_inner)
-        self.w2 = nn.Linear(d_inner, d_model)
-        self.w3 = nn.Linear(d_model, d_inner)
-
-        self.layer_norm = RMSNorm(d_model)
-
-    def forward(self, inp):
-        x = self.layer_norm(inp)
-        return inp + self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-class FF_llama2(nn.Module):
-    def __init__(self, d_in, d_inner, d_out):
-        super(FF_llama2, self).__init__()
-        # d_inner = int(2 * d_inner / 3)
-        d_inner = int(d_inner * (d_in + d_out) / (2 * d_in + d_out))
-
-        self.w1 = nn.Linear(d_in, d_inner)
-        self.w2 = nn.Linear(d_inner, d_out)
-        self.w3 = nn.Linear(d_in, d_inner)
-
-        # self.layer_norm = RMSNorm(d_in)
-
-    def forward(self, x):
-        # x = self.layer_norm(inp)
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-
-# class Attention_llama(nn.Module):
-#     def __init__(self, args):
-#         super().__init__()
-#         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-#         self.n_local_heads = args.n_heads // model_parallel_size
-#         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-#         self.n_rep = self.n_local_heads // self.n_local_kv_heads
-#         self.head_dim = args.dim // args.n_heads
-
-#         self.qkv_net = nn.Linear(d_model, 3 * n_head * d_head, bias=False)
-#         self.o_net = nn.Linear(n_head * d_head, d_model, bias=False)
-
-#         self.cache_k = torch.zeros(
-#             (
-#                 args.max_batch_size,
-#                 args.max_seq_len,
-#                 self.n_local_kv_heads,
-#                 self.head_dim,
-#             )
-#         ).cuda()
-#         self.cache_v = torch.zeros(
-#             (
-#                 args.max_batch_size,
-#                 args.max_seq_len,
-#                 self.n_local_kv_heads,
-#                 self.head_dim,
-#             )
-#         ).cuda()
-
-#     def forward(
-#         self,
-#         x: torch.Tensor,
-#         start_pos: int,
-#         freqs_cis: torch.Tensor,
-#         mask: Optional[torch.Tensor],
-#     ):
-#         bsz, seqlen, _ = x.shape
-
-#         xq, xk, xv = torch.chunk(self.qkv_net(x), 3, dim=-1)
-#         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-#         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-#         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
-#         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-#         self.cache_k = self.cache_k.to(xq)
-#         self.cache_v = self.cache_v.to(xq)
-
-#         self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-#         self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-#         keys = self.cache_k[:bsz, : start_pos + seqlen]
-#         values = self.cache_v[:bsz, : start_pos + seqlen]
-
-#         # repeat k/v heads if n_kv_heads < n_heads
-#         keys = repeat_kv(
-#             keys, self.n_rep
-#         )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-#         values = repeat_kv(
-#             values, self.n_rep
-#         )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-
-#         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-#         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-#         values = values.transpose(
-#             1, 2
-#         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-#         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-#         if mask is not None:
-#             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-#         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-#         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-#         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-#         return self.wo(output)
-
 
 class IncrementalBellmanFord:
     def __init__(self, n):
@@ -355,18 +204,18 @@ def has_cycle(adj_matrix):
 
 
 class MLPforBiaffine(nn.Module):
-    def __init__(self, input_dim, concat_dim, d_inner):
+    def __init__(self, output_dim, input_dim, d_inner):
         super(MLPforBiaffine, self).__init__()
         self.mlp = nn.Sequential(
-            nn.LayerNorm(concat_dim),
-            nn.Linear(concat_dim, d_inner),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, d_inner),
             nn.ReLU(),
-            nn.Linear(d_inner, input_dim)
+            nn.Linear(d_inner, output_dim)
         )
-
         nn.init.kaiming_normal_(self.mlp[1].weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.mlp[1].bias)
-        self.relu = nn.ReLU()
+        nn.init.kaiming_normal_(self.mlp[3].weight, mode='fan_in', nonlinearity='linear')
+        nn.init.zeros_(self.mlp[3].bias)
     
     def forward(self, inp):
         x = self.mlp(inp)
@@ -406,57 +255,55 @@ class BiaffineAttention(nn.Module):
     def __init__(self, out_dim, input_dim, n_head = 1, type="default"):
         super(BiaffineAttention, self).__init__()
         self.input_dim = input_dim
-        # self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, embed_len[0]),
-        #         torch.nn.Embedding(151, embed_len[1]),
-        #         torch.nn.Embedding(151, embed_len[2]),
-        #         torch.nn.Embedding(151, embed_len[3])])
-        # self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256),
-        #         torch.nn.Embedding(151, 256),
-        #         torch.nn.Embedding(151, 256),
-        #         torch.nn.Embedding(151, 256)])
-        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256) for _ in range(mixing_num)])
-        self.dep_to_parent_k = nn.Linear(mixing_num * 256, 2 * input_dim, bias=False)
-        self.dep_to_child_k = nn.Linear(mixing_num * 256, 2 * input_dim, bias=False)
-
         self.type = type
         self.temperature = 1.0
         self.concat_dim = input_dim * 3
-        # out_dim = 2048
         self.n_head = n_head
-        self.head_dim = out_dim // self.n_head
+        self.head_dim = out_dim
+        self.mlp1_in_dim = input_dim * 3
+        self.mlp1_out_dim = 2048
 
-        self.f_1 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)  #3072->3072->2048
-        self.f_3 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)
-        # self.f_1 = nn.Sequential(FF_llama(2048, 3072))
-        # self.f_3 = nn.Sequential(FF_llama(2048, 3072))
-        self.b_1 = nn.Parameter(torch.rand(self.head_dim + 1, self.head_dim + 1))
-        self.b_2 = nn.Parameter(torch.rand(self.head_dim + 1, self.head_dim + 1))
-
-        self.f_2 = MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)  #2048->2048->1024
-        self.f_4 = MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)
+        self.f_1 = MLPforBiaffine(self.mlp1_out_dim, self.mlp1_in_dim, 3072)  #3072->3072->2048
+        self.f_3 = MLPforBiaffine(self.mlp1_out_dim, self.mlp1_in_dim, 3072)
+        self.f_2 = MLPforBiaffine(1024, self.mlp1_out_dim, 2048)  #2048->2048->1024
+        self.f_4 = MLPforBiaffine(1024, self.mlp1_out_dim, 2048)
         # self.f_2 = nn.Sequential(MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)
         #     , MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head))
         # self.f_4 = nn.Sequential(MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)
         #     , MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head))
 
-        self.pos_emb = PositionalEmbedding(input_dim)
-        self.pos_to_parent_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
-        self.pos_to_child_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
+        self.pos_emb = PositionalEmbedding(1024)
+        self.pos_to_parent_k = nn.Linear(1024, self.mlp1_out_dim, bias=False)
+        self.pos_to_child_k = nn.Linear(1024, self.mlp1_out_dim, bias=False)
+        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256) for _ in range(mixing_num)])
+        self.dep_to_parent_k = nn.Linear(mixing_num * 256, self.mlp1_out_dim, bias=False)
+        self.dep_to_child_k = nn.Linear(mixing_num * 256, self.mlp1_out_dim, bias=False)
+
+        self.b_1 = nn.Parameter(torch.rand(self.head_dim, self.head_dim))
+        self.b_2 = nn.Parameter(torch.rand(self.head_dim, self.head_dim))
         
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
-            self.root_representation = nn.Parameter(torch.Tensor(1, self.concat_dim))
+            self.root_representation = nn.Parameter(torch.Tensor(1, self.mlp1_in_dim))
             self.softmax = nn.Sigmoid()
-            nn.init.xavier_uniform_(self.root_representation)
         
         self.arc_softmax = nn.Softmax(dim=-1)
-        self.prob = nn.Linear(self.head_dim + 1, 30)
+        self.prob = nn.Linear(self.head_dim, 30)
         if self.n_head != 1:
             self.onet = nn.Linear(self.n_head, 1)
         
+        for layer in [self.pos_to_parent_k, self.pos_to_child_k, self.dep_to_child_k, self.dep_to_parent_k]:
+            nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='linear')
+        nn.init.xavier_normal_(self.root_representation)
+        nn.init.kaiming_normal_(self.b_1, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.b_2, mode='fan_in', nonlinearity='linear')
+        for embed_layer in self.depth_embed:
+            fan_in = nn.init._calculate_correct_fan(embed_layer.weight, 'fan_in')
+            nn.init.uniform_(embed_layer.weight, -np.sqrt(3 / fan_in), np.sqrt(3 / fan_in))
+        
     def forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
-        # attn_relpos = torch.stack([attn_relpos[0], attn_relpos[1], attn_relpos[2]]).to(attn_relpos.device)  # ablation
+        # attn_relpos = torch.stack([attn_relpos[0], attn_relpos[1], attn_relpos[2]]).to(attn_relpos.device)
         batchsize = hidden.shape[0]
         child_hidden = self.f_3(hidden) # b*i*d
         if self.type == "Multi":
@@ -496,10 +343,12 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        logits = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
-
-        # square = (parent_hidden * child_hidden).clone()
-        square = torch.einsum('bijn,nn,bijn->bijn', F.pad(parent_hidden, (0, 1)), self.b_2, F.pad(child_hidden, (0, 1)))
+        if self.head_dim == 1024:
+            logits = torch.einsum('bijd,dd,bijd->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
+            square = torch.einsum('bijn,nn,bijn->bijn', parent_hidden, self.b_2, child_hidden)
+        else:
+            square = torch.einsum('bijn,nn,bijn->bijn', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
+            logits = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
         steps = torch.arange(1, time_step + 1, device=hidden.device)
         scales = torch.sqrt(steps * 2).view(1, -1, 1)  # (1, time_step, 1)
         row_mask = torch.tril(torch.ones_like(position))[:-1, :]
@@ -513,17 +362,17 @@ class BiaffineAttention(nn.Module):
         scores = self.softmax(logits)
         return scores, logits, arc_num_prob, arc_num_logits
 
-    def multihead_forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)  # ablation
+    def multihead_forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
         batchsize = hidden.shape[0]
         child_hidden = self.f_3(hidden) # b*i*d
         if self.type == "Multi":
-            repeat_shape = list(hidden.shape)
-            repeat_shape[-1] = 1
-            repeat_shape[-2] = 1
+            repeat_shape = [1]*len(hidden.shape)
+            repeat_shape[0] = batchsize
             root_tokens = self.root_representation.repeat(*repeat_shape)
-            hidden = torch.cat((root_tokens, hidden), dim=hidden.dim() - 2)
-        parent_hidden = self.f_1(hidden)
-        time_step = parent_hidden.shape[-2] - 1 # time vary position embedding
+            # hidden = torch.cat((root_tokens, hidden), dim=1)
+            parent_hidden = torch.cat((root_tokens, child_hidden), dim=1)
+        # parent_hidden = self.f_1(hidden)
+        time_step = parent_hidden.shape[1] - 1 # time vary position embedding
         parent_hidden = parent_hidden.unsqueeze(1).repeat(1, time_step, 1, 1)    # b*i*j*d
         child_hidden = child_hidden.unsqueeze(1).repeat(1, time_step + 1, 1, 1).permute(0, 2, 1, 3)
         attn_relpos = torch.clip(attn_relpos, 0, 150).long()
@@ -536,26 +385,33 @@ class BiaffineAttention(nn.Module):
         embed_biases_child = torch.cat(embed_tuple_child, dim=-1)
         embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
         embed_biases_child = self.dep_to_child_k(embed_biases_child)
-        
-        position = torch.arange(hidden.size(1), device=hidden.device).unsqueeze(1) - torch.arange(hidden.size(1), device=hidden.device)
+        position = torch.arange(time_step + 1, device=hidden.device).unsqueeze(1) - torch.arange(time_step + 1, device=hidden.device)
         child_position = F.pad(torch.triu(position.T)[:, :-1], (1,0))[:-1, :]
         parent_position = torch.tril(position)[1:, :]
         parent_position = (torch.stack([self.pos_emb(pos) for pos in parent_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
         child_position = (torch.stack([self.pos_emb(pos) for pos in child_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
         parent_pos_info = self.pos_to_parent_k(parent_position)
         child_position_info = self.pos_to_child_k(child_position)
-        parent_hidden = parent_hidden + parent_pos_info + embed_biases_parent
-        child_hidden = child_hidden + child_position_info + embed_biases_child
 
-        new_parent_shape = parent_hidden.shape[:-1] + (self.n_head, 2048 // self.n_head)
-        new_child_shape = child_hidden.shape[:-1] + (self.n_head, 2048 // self.n_head)
+        new_parent_shape = parent_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)
+        new_child_shape = child_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)
         parent_hidden = parent_hidden.view(new_parent_shape)
         child_hidden = child_hidden.view(new_child_shape)
+
+        parent_pos = (parent_pos_info + embed_biases_parent).unsqueeze(-2)
+        parent_pos_head = parent_pos.expand(-1, -1, -1, self.n_head, -1) 
+        parent_hidden = torch.cat((parent_hidden, parent_pos_head), dim=-1)
+        child_pos = (child_position_info + embed_biases_child).unsqueeze(-2)
+        child_pos_head = child_pos.expand(-1, -1, -1, self.n_head, -1) 
+        child_hidden = torch.cat((child_hidden, child_pos_head), dim=-1)
+
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        square = torch.einsum('bijnd,dd,bijnd->bijd', F.pad(parent_hidden, (0, 1)), self.b_2, F.pad(child_hidden, (0, 1)))
-        logits = torch.einsum('bijnd,dd,bijnd->bjin', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        # square = torch.einsum('bijnd,dd,bijnd->bijd', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
+        # logits = torch.einsum('bijnd,dd,bijnd->bjin', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
+        square = torch.einsum('bijnd,dd,bijnd->bijd', parent_hidden, self.b_2, child_hidden)
+        logits = torch.einsum('bijnd,dd,bijnd->bjin', parent_hidden, self.b_1, child_hidden)
         if self.n_head != 1:
             logits = self.onet(logits)
         logits = logits.squeeze(-1)
@@ -607,12 +463,16 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        if self.head_dim == 1024:
+            scores = torch.einsum('bjd,dd,bid->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
+            arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2, child_hidden)
+        else:
+            scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
+            arc_num_scores = torch.einsum('bin, nn, bjn->bijn', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
         # scores = torch.zeros(batchsize, parent_hidden.shape[1], child_hidden.shape[1])
         # scores[:, -1:, :] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden[:,-1:,:], (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
         # scores[:, :, -1:] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
         scores = self.softmax(scores)
-        arc_num_scores = torch.einsum('bin, nn, bjn->bijn', F.pad(parent_hidden, (0, 1)), self.b_2, F.pad(child_hidden, (0, 1)))
         # arc_num_scores = (torch.einsum('bn, nn, bjn->bjn', parent_hidden[:,-1,:], self.b_2, child_hidden[:,:-1,:]).sum(dim=-2) + torch.einsum('bin, nn, bn->bin', parent_hidden, self.b_2, child_hidden[:,-1,:]).sum(dim=-2)) / np.sqrt(2 * child_hidden.shape[1])
         # arc_num_scores = torch.einsum('bin, bjn->bijn', parent_hidden, child_hidden)
         arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
@@ -624,12 +484,12 @@ class BiaffineAttention(nn.Module):
         batchsize = hidden.shape[0]
         child_hidden = self.f_3(hidden)
         if self.type == "Multi":
-            repeat_shape = list(hidden.shape)
-            repeat_shape[-1] = 1
-            repeat_shape[-2] = 1
+            repeat_shape = [1]*len(hidden.shape)
+            repeat_shape[0] = batchsize
             root_tokens = self.root_representation.repeat(*repeat_shape)
-            hidden = torch.cat((root_tokens, hidden), dim=hidden.dim() - 2)
-        parent_hidden = self.f_1(hidden)
+            # hidden = torch.cat((root_tokens, hidden), dim=1)
+            parent_hidden = torch.cat((root_tokens, child_hidden), dim=1)
+        # parent_hidden = self.f_1(hidden)
 
         step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
         child_relpos = F.pad(step_attn_relpos[:, :, 1:], (0,1))
@@ -646,18 +506,29 @@ class BiaffineAttention(nn.Module):
         child_position = parent_position[:,1:,:]
         parent_position_info = self.pos_to_parent_k(parent_position)
         child_position_info = self.pos_to_child_k(child_position)
-        parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
-        child_hidden = child_hidden + child_position_info + embed_biases_child
+        # parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
+        # child_hidden = child_hidden + child_position_info + embed_biases_child
 
-        new_shape_p = parent_hidden.shape[:-1] + (self.n_head, 2048 // self.n_head)  # [B, L+1, n_head, head_dim]
-        new_shape_c = child_hidden.shape[:-1]  + (self.n_head, 2048 // self.n_head)  # [B, L,   n_head, head_dim]
+        new_shape_p = parent_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)  # [B, L+1, n_head, head_dim]
+        new_shape_c = child_hidden.shape[:-1]  + (self.n_head, self.mlp1_out_dim // self.n_head)  # [B, L,   n_head, head_dim]
         parent_hidden = parent_hidden.view(new_shape_p)
         child_hidden = child_hidden.view(new_shape_c)
+
+        parent_pos = (parent_position_info + embed_biases_parent).unsqueeze(-2)
+        parent_pos_head = parent_pos.expand(-1, -1, self.n_head, -1) 
+        parent_hidden = torch.cat((parent_hidden, parent_pos_head), dim=-1)
+        child_pos = (child_position_info + embed_biases_child).unsqueeze(-2)
+        child_pos_head = child_pos.expand(-1, -1, self.n_head, -1) 
+        child_hidden = torch.cat((child_hidden, child_pos_head), dim=-1)
+
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
-
-        arc_num_scores = torch.einsum('bind, dd, bjnd->bijd', F.pad(parent_hidden, (0, 1)), self.b_2, F.pad(child_hidden, (0, 1)))
-        scores = torch.einsum('bjnd,dd,bind->bjin', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
+        
+        arc_num_scores = torch.einsum('bind, dd, bjnd->bijd', parent_hidden, self.b_2, child_hidden)
+        scores = torch.einsum('bjnd,dd,bind->bjin', parent_hidden, self.b_1, child_hidden)
+        # arc_num_scores = torch.einsum('bind, dd, bjnd->bijd', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
+        # scores = torch.einsum('bjnd,dd,bind->bjin', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
+        
         if self.n_head != 1:
             scores = self.onet(scores)
         scores = scores.squeeze(-1)
@@ -797,7 +668,7 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # embed_len = kwargs.pop('embed_len', None)
         super(RelPartialLearnableMultiHeadAttn, self).__init__(*args, **kwargs)
         self.r_net = nn.Linear(self.d_model, self.n_head * self.d_head, bias=False)
-        self.embed_k_net = nn.ModuleList([torch.nn.Linear(256, 1024) for _ in range(mixing_num)])
+        self.embed_k_net = nn.ModuleList([torch.nn.Linear(256, self.d_model) for _ in range(mixing_num)])
 
     def forward(self, w, r, r_w_bias, r_r_bias, attn_mask=None, attn_relpos=None, min_len=None, max_len=None
         , mems=None, terminal=False, past_keys=None, past_values=None, cache=False, content_rel_embed=None):
@@ -830,36 +701,9 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
                 biases = [self.embed_k_net[i](biases[i]) for i in range(mixing_num)]
                 # biases = [self.embed_k_net[i](biases[i]).repeat(1, self.n_head) for i in range(mixing_num)]
                 rel_wk = [(bias@W_k.T).view(max_len - min_len + 1, self.n_head, self.d_head) for bias in biases]
-                # if attn_relpos.dim() == 4:
-                #     # content_rel_embed, pos_rel_embed = content_rel_embed
-                #     degree_embed, distance_embed, depth_embed, predepth_embed = content_rel_embed
-                #     rel_len = [embed_layer.weight.shape[1] for embed_layer in content_rel_embed]
-                #     rel_wk = []
-                #     # rel_rk = []
-                #     start_pos, end_pos = 0, rel_len[0]
-                #     for i in range(attn_relpos.dim()):
-                #         biases = content_rel_embed[i](r2)
-                #         # biases2 = pos_rel_embed[i](r2)
-                #         rel_wk.append((biases @ W_k[:, start_pos:end_pos].T).view(max_len - min_len + 1, self.n_head, self.d_head))
-                #         # rel_rk.append((biases2 @ R_k[:, start_pos:end_pos].T).view(max_len - min_len + 1, self.n_head, self.d_head))
-                #         start_pos += rel_len[i]
-                #         if i != attn_relpos.dim() - 1:
-                #             end_pos += rel_len[i + 1]
-                # else:
-                #     depth_biases = content_rel_embed(r2)
-                #     # Moderate_rk = self.r_net(depth_biases)
-                #     Moderate_wk = depth_biases @ W_k.T
-                #     Moderate_wk = Moderate_wk.view(max_len - min_len + 1, self.n_head, self.d_head)
-                #     # Moderate_rk = Moderate_rk.view(max_len - min_len + 1, self.n_head, self.d_head)
 
             w_head_q, w_head_k, w_head_v = torch.chunk(w_heads, 3, dim=-1)
             # _, w_head_k, _ = torch.chunk(w_graphlayer, 3, dim=-1)
-        # #test    
-        # r_heads = self.qkv_net(r)
-        # r_head_q, r_head_k, r_head_v = torch.chunk(r_heads, 3, dim=-1)
-        # r_head_q = r_head_q.view(rlen, self.n_head, self.d_head)
-        # r_head_k = r_head_k.view(rlen, self.n_head, self.d_head)
-        # #---
         if cache:
             new_key = w_head_k.view(qlen, bsz, -1)
             new_value = w_head_v.view(qlen, bsz, -1)
@@ -878,10 +722,6 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         #     r_head_k = r_head_k.view(rlen, bsz, self.n_head, self.d_head)       # rlen x bsz x n_head x d_head
         # else:
         r_head_k = r_head_k.view(rlen, self.n_head, self.d_head)                # rlen x n_head x d_head
-        # #test
-        # r_w_bias = r_head_q[-1]
-        # r_r_bias = r_head_q[-1]
-        # #---
         #### compute attention score
         rw_head_q = w_head_q + r_w_bias # L * B * n_head * d_head               # qlen x bsz x n_head x d_head
         AC = torch.einsum('ibnd,jbnd->ijbn', (rw_head_q, w_head_k))             # qlen x klen x bsz x n_head
@@ -895,33 +735,14 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         if attn_relpos is None:
             BD = self._rel_shift(BD)
         else:
-            # RkD
-            if attn_relpos.dim() != 4:
-                attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
-                # attn_relpos = torch.randint(min_len, max_len, size=attn_relpos.shape).long().cuda()
-                # attn_relpos = torch.zeros_like(attn_relpos)
-                # attn_relpos = torch.arange(1, attn_relpos.shape[1] + 1).unsqueeze(0).repeat(attn_relpos.shape[0], attn_relpos.shape[2], 1).cuda()
-                attn_relpos = attn_relpos.permute(1, 2, 0)
-                # Moderate_BD = torch.einsum('ibnd,jnd->ijbn', (rr_head_q, Moderate_rk))
-                Moderate_AC = torch.einsum('ibnd,jnd->ijbn', (rw_head_q, Moderate_wk))
-                attn_relpos = (max_len - attn_relpos).long()
-                # BD = self._rel_shift(BD) + Moderate_BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1])) + Moderate_AC.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-                BD = self._rel_shift(BD) + Moderate_AC.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-                # BD.gather(1, attn_relpos.unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-            else:
-                # min_len = -75
-                attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
-                attn_relpos = attn_relpos.permute(0, 2, 3, 1)
-                attn_relpos = (max_len - attn_relpos).long()
-                # depth_relpos = (depth_relpos - 75).long()
-                # depth_relpos = torch.clip(depth_relpos, min_len, max_len).long()
-                Moderate_AC_rel = [torch.einsum('ibnd,jnd->ijbn', (rw_head_q, item)) for item in rel_wk]   # exchange position
-                BD = self._rel_shift(BD)
-                for idx, item in enumerate(Moderate_AC_rel):
-                    BD = BD + item.gather(1, attn_relpos[idx].unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
-                # Moderate_BD_rel = [torch.einsum('ibnd,jnd->ijbn', (rr_head_q, item)) for item in rel_rk]
-                # for idx, item in enumerate(Moderate_BD_rel):
-                #     BD = BD + item.gather(1, attn_relpos[idx].unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
+            # min_len = -75
+            attn_relpos = torch.clip(attn_relpos, min_len, max_len).long()
+            attn_relpos = attn_relpos.permute(0, 2, 3, 1)
+            attn_relpos = (max_len - attn_relpos).long()
+            Moderate_AC_rel = [torch.einsum('ibnd,jnd->ijbn', (rw_head_q, item)) for item in rel_wk]   # exchange position
+            BD = self._rel_shift(BD)
+            for idx, item in enumerate(Moderate_AC_rel):
+                BD = BD + item.gather(1, attn_relpos[idx].unsqueeze(-1).expand(-1, -1, -1, BD.shape[-1]))
 
         # logger.info("AC: %s", str(AC.shape))
         # logger.info("BD: %s", str(BD.shape))
@@ -941,6 +762,16 @@ class RelPartialLearnableMultiHeadAttn(RelMultiHeadAttn):
         # [qlen x klen x bsz x n_head]
         attn_prob = F.softmax(attn_score, dim=1)
         attn_prob = self.drop(attn_prob)
+
+        # file_name = "./outputs/record_GiLT_small_0921v1_attn_prob_Writing"
+        # tgt_len, src_len = np.load(f'{file_name}.mmap.shape.npy')
+        # mmap = np.memmap(f'{file_name}.mmap', dtype=np.float32, mode='r+',
+        #                 shape=(16, tgt_len, src_len))
+        # # record_attn_prob = attn_prob[:, :, :, 7].detach().cpu().numpy()
+        # record_attn_prob = torch.mean(attn_prob, dim=-1).detach().cpu().numpy()
+        # if attn_prob.shape[0] == attn_prob.shape[1] and attn_prob.shape[0] != 1:
+        #     mmap[0, :] = record_attn_prob[:tgt_len, :src_len, 0]
+        #     mmap.flush()
 
         #### compute attention vector
         attn_vec = torch.einsum('ijbn,jbnd->ibnd', (attn_prob, w_head_v))
@@ -1109,7 +940,7 @@ class TransformerGrammar(nn.Module):
 
             attn_relpos = []
             attn_relpos_for_pointer = []
-            if rel_type == "degree" or rel_type == "mixing":
+            if rel_type == "degree" or rel_type == "mixing": # ablation
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
                     input_size = len(sent_index_to_id) - 1
                     id_to_index = {}
@@ -1273,7 +1104,7 @@ class TransformerGrammar(nn.Module):
                         # sent_attn_relpos.append([0]*(length_i))
                     attn_relpos_for_pointer.append(sent_attn_relpos_for_pointer[:-1])
                     attn_relpos.append(sent_attn_relpos)
-            if rel_type == "predicate_depth": # ablation or rel_type == "mixing"
+            if rel_type == "predicate_depth": # or rel_type == "mixing"
                 for left_sent_arrow, right_sent_arrow, sent_index_to_id in zip(left_sents_arrow, right_sents_arrow, sents_index_to_id):
                     input_size = len(sent_index_to_id) - 1
                     id_to_index = {}
@@ -1319,200 +1150,6 @@ class TransformerGrammar(nn.Module):
             if torch.cuda.is_available():
                 attn_relpos = attn_relpos.cuda()
                 attn_relpos_for_pointer = [attn_relpos_for_pointer[i].cuda() for i in range(batch)]
-
-        elif use_mask == 'sdp_arc':
-            assert sents_index_to_id is not None and sents_arrow is not None
-            index_dict = {"bos_id": self.bos_id, "vocab_size": self.vocab_size, "pad_id": self.pad_id,
-                "left_arc": self.left_arc, "right_arc": self.right_arc, "left_arc2": self.left_arc2, "right_arc2": self.right_arc2}
-            length_i = max([len(sent) for sent in x])
-            for sent, sent_startofword, sent_index_to_id, sent_arrow in zip(x, startofword_x, sents_index_to_id, sents_arrow):
-                id_to_index = {}
-                for i in range(len(sent_index_to_id)):
-                    if sent_index_to_id[i] != -1 and sent_index_to_id[i] not in id_to_index:
-                        id_to_index[sent_index_to_id[i]] = i
-                
-                # src_ = torch.LongTensor(sent[:-1])
-                # tgt_ = torch.LongTensor(sent[1:])
-                # src_startofword = torch.LongTensor(sent_startofword[:-1])
-                # tgt_startofword = torch.LongTensor(sent_startofword[1:])
-                src_ = sent[:-1]
-                tgt_ = sent[1:]
-                src_p = src_ + [self.pad_id] * (length_i - len(src_))
-                tgt_p = tgt_ + [self.pad_id] * (length_i - len(tgt_))
-
-                mask = torch.tril(torch.ones((len(src_p), len(src_p)), dtype = torch.uint8)).bool()
-                Tree_structure = masking_utils.UnionFind(len(src_p))
-                false_position_list = []
-                for i in range(len(src_p)):
-                    if src_p[i] == self.pad_id:
-                        break
-                    if src_p[i] == self.left_arc or src_p[i] == self.right_arc:
-                        mask[i][:] = False
-                        arrow_word_start = id_to_index[sent_arrow[i]]
-                        arrow_words_end = arrow_word_start + 1
-                        while sent_index_to_id[arrow_words_end] == sent_arrow[i]:
-                            arrow_words_end += 1
-                        mask[i][arrow_word_start:arrow_words_end] = True
-
-                        pos = i - 1
-                        while sent_index_to_id[pos] == -1 and pos not in id_to_index.values():
-                            pos -= 1
-                        end_predicate = pos + 1
-                        while pos not in id_to_index.values():
-                            pos -= 1
-                        start_predicate = pos
-
-                        Tree_structure.attn_bool[arrow_word_start:arrow_words_end] = [False] * (arrow_words_end - arrow_word_start)
-                        Tree_structure.attn_bool[start_predicate:end_predicate] = [False] * (end_predicate - start_predicate)
-                        # Tree_structure.union(i, id_to_index[sent_arrow[i]]) #arc token and parent token also set False
-                        # for idx in range(start_predicate, end_predicate, 1):
-                            # Tree_structure.union(idx, id_to_index[sent_arrow[i]]) #compose here and use it later 
-                        mask[i][start_predicate:end_predicate] = True
-                        if src_p[i] == self.left_arc:
-                            predicate_id = [k for k, v in id_to_index.items() if v == pos][0]
-                            id_to_index[predicate_id] = i
-                        else:
-                            id_to_index[sent_arrow[i]] = i
-                        mask[i][i] = True
-                    elif src_p[i] == self.left_arc2 or src_p[i] == self.right_arc2:
-                        false_position_list = Tree_structure.Get_false_position(i)
-                        Tree_structure.attn_bool[i] = False
-                        for false_pos in false_position_list:
-                            mask[i][false_pos] = False
-                        false_position_list.append(i)
-                    else:
-                        for false_pos in false_position_list:
-                            mask[i][false_pos] = False
-                
-                attn_mask.append(np.array(mask))
-                inputs.append(np.array(src_p))
-                targets.append(np.array(tgt_p))
-
-            if torch.cuda.is_available():
-                inputs = torch.LongTensor(np.array(inputs)).cuda()
-                targets = torch.LongTensor(np.array(targets)).cuda()
-                attn_mask = torch.LongTensor(np.array(attn_mask)).cuda().bool()
-            else:
-                inputs = torch.LongTensor(np.array(inputs))
-                targets = torch.LongTensor(np.array(targets))
-                attn_mask = torch.LongTensor(np.array(attn_mask)).bool()
-            
-            attn_relpos = None
-        
-        elif use_mask == 'txl' or use_mask == 'txl_arc':
-            length_i = max([len(sent) for sent in x])
-            ranges = masking_utils.TokenTypeRanges(self.bos_id, self.pad_id, self.vocab_size, self.left_arc, self.right_arc)
-            maskrules = masking_utils.get_masking_rules(
-                "stack_compose_double_closing_nt", #txl
-                sequence_length=512, 
-                memory_length=512, 
-                transparency_prob=0.0,
-                gather_into_new_memory=True, 
-                transparency_depth_threshold=-1 
-            )
-            for sent, sent_startofword in zip(x, startofword_x):
-                src_ = torch.LongTensor(sent[:-1])
-                tgt_ = torch.LongTensor(sent[1:])
-                src_startofword = torch.LongTensor(sent_startofword[:-1])
-                # print(src_startofword)
-                tgt_startofword = torch.LongTensor(sent_startofword[1:])
-                info_tuple = masking_utils.compute_token_types(
-                    {"inputs": src_, "labels": tgt_}, ranges
-                )
-                startofword_tuple = masking_utils.compute_token_types(
-                    {"inputs": src_startofword, "labels": tgt_startofword}, ranges
-                )
-                # print(startofword_tuple['inputs_ttypes'])
-                chunks = maskrules.chunks_for_sequence(info_tuple['inputs'], startofword_tuple['inputs_ttypes'],
-                                                       info_tuple['labels'], startofword_tuple['labels_ttypes'])
-                chunks = [types.Chunk(None, *chunk) for chunk in chunks]
-                if not document_level:
-                    chunk = chunks[0]
-                    src_p = chunk.inputs[:length-1]
-                    composed_pos = chunk.composed_position[:length-1]
-                    src_raw = sent[:]
-                    idx = 0
-                    if use_mask != 'txl_arc':
-                        for i in range(len(sent)):
-                            if sent[i] == self.left_arc or sent[i] == self.right_arc:
-                                src_raw[i] = src_p[composed_pos[idx]]
-                                idx += 1
-                            idx += 1
-                    src_ = src_raw[:-1]
-                    tgt_ = sent[1:]
-                    src_p = src_ + [self.pad_id] * (length_i - len(src_))
-                    inputs.append(np.array(src_p))
-                    tgt_p = tgt_ + [self.pad_id] * (length_i - len(tgt_))
-                    targets.append(np.array(tgt_p))
-            inputs = torch.LongTensor(np.array(inputs))  #!!cuda
-            targets = torch.LongTensor(np.array(targets))  #!!cuda
-
-            attn_mask = torch.tril(torch.ones((length_i, length_i), dtype = torch.uint8)).bool()  #!!cuda
-            attn_mask = attn_mask.unsqueeze(0).expand(batch, -1, -1)
-            attn_relpos = None
-
-        else:
-            ranges = masking_utils.TokenTypeRanges(self.bos_id, self.pad_id, self.vocab_size, self.left_arc, self.right_arc)
-            maskrules = masking_utils.get_masking_rules(
-                "stack_compose_double_closing_nt", 
-                sequence_length=512, 
-                memory_length=512, 
-                transparency_prob=0.0,
-                gather_into_new_memory=True, 
-                transparency_depth_threshold=-1 
-            )
-            for sent, sent_startofword in zip(x, startofword_x):
-                src_ = torch.LongTensor(sent[:-1])
-                # print(src_)
-                tgt_ = torch.LongTensor(sent[1:])
-                src_startofword = torch.LongTensor(sent_startofword[:-1])
-                # print(src_startofword)
-                tgt_startofword = torch.LongTensor(sent_startofword[1:])
-                info_tuple = masking_utils.compute_token_types(
-                    {"inputs": src_, "labels": tgt_}, ranges
-                )
-                startofword_tuple = masking_utils.compute_token_types(
-                    {"inputs": src_startofword, "labels": tgt_startofword}, ranges
-                )
-                # print(startofword_tuple['inputs_ttypes'])
-                chunks = maskrules.chunks_for_sequence(info_tuple['inputs'], startofword_tuple['inputs_ttypes'],
-                                                       info_tuple['labels'], startofword_tuple['labels_ttypes'])
-                chunks = [types.Chunk(None, *chunk) for chunk in chunks]
-                if not document_level:
-                    # only consider the first chunk
-                    chunk = chunks[0]
-                    src_p = chunk.inputs[:length-1]
-                    # print(src_p)
-                    composed_pos = chunk.composed_position[:length-1]
-                    if use_mask != 'arc':
-                        src_p = src_p[composed_pos]
-                    # print(src_p)
-                    inputs.append(np.array(src_p))
-                    tgt_p = chunk.labels[:length-1]
-                    # new_length, = np.where(tgt_p == self.pop_root)
-                    # new_length = new_length[0]
-                    # new_length += 1
-                    targets.append(np.array(tgt_p))
-                    mask = chunk.attn_mask[:length-1, :length-1]
-                    # with np.printoptions(threshold=np.inf):
-                    #     print(mask[:new_length, :new_length])
-                    for i in range(len(mask)):
-                        mask[i, i] = 1
-                    attn_mask.append(np.array(mask))
-                    chunk_len = len(chunk.attn_mask[0])
-                    relpos = chunk.attn_relpos[:len(mask), chunk_len:chunk_len + len(mask)]
-                    if use_mask == 'new':
-                        relpos = np.clip(relpos, -1, 0)
-                    # with np.printoptions(threshold=np.inf):
-                    #     print(relpos[:new_length, :new_length])
-                    # exit()
-                    attn_relpos.append(np.array(relpos))
-                else:
-                    pass #remain to be implemented
-            inputs = torch.LongTensor(np.array(inputs)).cuda()
-            targets = torch.LongTensor(np.array(targets)).cuda()
-            attn_mask = torch.LongTensor(np.array(attn_mask)).cuda().bool()
-            attn_relpos = torch.LongTensor(np.array(attn_relpos)).cuda()
 
         if use_mask == 'linear':
             attn_relpos = None
@@ -1574,42 +1211,16 @@ class TransformerGrammar(nn.Module):
                     idx = find_label_idx(sent, [2745, 11346, 5599]) + 2
                 mask[idx, j] = 1
             loss = loss * mask
-        # if iseval:
-        #     pred_seq = np.argmax(prob.cpu(), axis=1).permute(1,0)
-        #     tgt_seq = targets.permute(1, 0).contiguous()
-        #     import sentencepiece as spm
-        #     sp = spm.SentencePieceProcessor()
-        #     sp.load('../data_process/spm_parsing/BLLIP_spm.model')
-        #     for i in range(len(pred_seq)):
-        #         if 2 in pred_seq[i]:
-        #             index = torch.where(pred_seq[i] == 2)[0][0]
-        #         print("\npred seq:", sp.decode(pred_seq[i][:index].tolist()))
-        #         print("gt seq:", sp.decode(tgt_seq[i].tolist()))
-        #         import pdb; pdb.set_trace()
 
         loss = loss.permute(1, 0).contiguous()
-        # logger.info(targets[:, -1])
-        # logger.info(loss[-1])
-        # logger.info(torch.sum(loss[-1]) / targets.size(0))
-        # word_loss = loss[-1][(targets[:, -1] != self.pad_id) & (targets[:, -1] != self.left_arc) & (
-        #     targets[:, -1] != self.right_arc) & (targets[:, -1] != self.left_arc2) & (
-        #     targets[:, -1] != self.right_arc2) ] 
-        # word_loss = loss[-1][(targets[:, -1] != self.pad_id) & (targets[:, -1] != self.left_arc) & (
-        #     targets[:, -1] != self.right_arc)]
-        # logger.info(loss[-1][])
-        # logger.info(avg_loss)
-        # logger.info(avg_loss_2)
-        # exit()
         loss = loss.sum(1)
-        
-        # return word_loss
 
         if return_h:
             if finetune == "sts":
                 STS_output = self.STS(hiddens[-1][[len(sent) - 2 for sent in x], [i for i in range(batch)]])
                 return STS_output, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob
             if use_mask == "graphlayer":
-                return loss, torch.cat([hiddens[9], hiddens[15]], dim = -1), word_emb, attn_relpos_for_pointer, prob    #torch.cat([hiddens[9], hiddens[15]], dim = -1)
+                return loss, torch.cat([hiddens[self.num_layers // 2 + 1], hiddens[self.num_layers - 1]], dim = -1), word_emb, attn_relpos_for_pointer, prob    #torch.cat([hiddens[9], hiddens[15]], dim = -1)
                 # return loss, (hiddens[9] + hiddens[15]) / 2
             return loss, core_out, prob
         elif finetune == "sts":
@@ -1791,26 +1402,3 @@ class TransformerGrammar(nn.Module):
             new_values = new_values.reshape(new_values.size(0), new_values.size(1), -1)
 
             return prob, new_keys, new_values
-
-if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
-    biaffine_model.to(device)
-    inp = torch.rand(64, 20, 3072).to(device)
-    attn_inp = torch.rand(2, 64, 20).to(device)
-    attn_inp2 = torch.rand(2, 64, 20, 21).to(device)
-    start_time = time.time()
-    for i in range(10):
-        # out = biaffine_model.inference(inp, attn_inp)
-        out2 = biaffine_model.forward(inp, attn_inp2)
-        # import pdb;pdb.set_trace()
-    end_time = time.time()
-    print((end_time - start_time) / 10)
-
-    # cpu original 1.29s average
-    # cpu 8 * 128 1.04s
-    # cpu 16 * 64 1.05s
-    # cpu fast 8 * 128 0.62s
-
-    # gpu original 0.095s
-    # gpu fast 0.06s
