@@ -28,7 +28,7 @@ parser.add_argument('--model_path', default='models/graphlayer.pt', type=str)
 parser.add_argument('--beamsize', default=100, type=int)
 parser.add_argument('--scorebeamsize', default=20, type=int)
 parser.add_argument('--parse', default=False, action='store_true')
-parser.add_argument('--parse_file', default='../data_process/test_psd_multiarrow_parsing.txt', type=str)
+parser.add_argument('--output_file', default='../data_process/test_psd_multiarrow_parsing.txt', type=str)
 parser.add_argument('--finetuneset', default=None, type=str)
 
 if torch.cuda.is_available():
@@ -57,8 +57,8 @@ if __name__ == "__main__":
     logger.info("Score beam size: {}".format(scorebeamsize))
     logger.info(f"parse: {args.parse}")
     if args.parse:
-        logger.info(f"parse file: {args.parse_file}")
-        fw = open(args.parse_file, 'w')
+        logger.info(f"output file: {args.output_file}")
+        fw = open(args.output_file, 'w')
     checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
     model.eval()

@@ -9,7 +9,9 @@ import argparse
 import time
 from helping_utils.logger import configure_logger, get_logger
 from model_bllip_dep import TransformerGrammar, BiaffineAttention, calculate_depth, dijkstra
-from beam_search_utils import update_beam, load_vocab, load_data, add_to_all
+from beam_search_utils import update_beam, load_vocab, load_data, add_to_all, GiLT_GPT2_update_beam
+from gpt2_posttraining import synchronize_arrows, GiLTGPT2LMHead, startofword_id
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from copy import deepcopy
 import json
 import re
@@ -110,6 +112,9 @@ if __name__ == "__main__":
     configure_logger('logs/sg_test.log')
     logger = get_logger()
     vocab_size, pad, bos, eos, startofword_id, vocab = load_vocab('../data_process/spm_parsing/BLLIP_spm.vocab')
+    # tokenizer = GPT2Tokenizer.from_pretrained("/home/huangty/GPT2/medium355M")
+    # tokenizer.add_prefix_space = True
+    # bos_eos_id = 50256
     torch.manual_seed(123456)
     np.random.seed(123456)
     original = []
@@ -126,6 +131,11 @@ if __name__ == "__main__":
     checkpoint = torch.load(model_path, map_location=torch.device(device), weights_only=False)
     model = checkpoint['model']
     biaffine_model = checkpoint['biaffine_model']
+    # model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
+    # checkpoint = torch.load("models/GiLT_gpt2_medium_post_8_checkpoint.pt", map_location=device)
+    # model.load_state_dict(checkpoint["model"])
+    # biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
+    # biaffine_model.load_state_dict(checkpoint["biaffine_model"])
     model.eval()
     biaffine_model.eval()
     model.to(device)
@@ -158,6 +168,7 @@ if __name__ == "__main__":
             examples = test_suite_parser.get_example(idx)
             phen2surprisals = {}
             for phen in examples:
+                # encoded = [[bos_eos_id]] + [tokenizer.encode(tokenizer.decode(tokenizer.encode(item)).strip()) for item in examples[phen]] + [[bos_eos_id]]
                 encoded = sp.Encode(examples[phen] + ["."], out_type=int)
                 tgt_idx = []
                 encoded.insert(0, [1])
@@ -180,10 +191,17 @@ if __name__ == "__main__":
                     elif startofword_id[word_id] == 1:
                         count_num += 1
                     sent_index_to_id.append(count_num)
+
+                # start_predict_new_word = [1 if startofword_id[encoded[i + 1]] else 0 for i in range(len(encoded) - 1)]
+                # sent_index_to_id = synchronize_arrows([encoded])[0]
                 
                 scores, _ = update_beam(encoded, model, biaffine_model, start_predict_new_word,
                     sent_index_to_id, beamsize, scorebeamsize, device, logger)
 
+                # scores, _ = GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word,
+                #     sent_index_to_id, beamsize, scorebeamsize, device, logger)
+                # output = model(torch.tensor(np.array([encoded])).to(device))
+                # prob = output.logits.permute(1, 2, 0)
                 # _, prob = model([encoded], None, None, use_mask=None)
                 # prob = prob.log_softmax(-2)
                 # scores = [-prob[i, encoded[i + 1]].item() for i in range(len(encoded[1:]))]

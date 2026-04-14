@@ -11,7 +11,7 @@ import os
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
 
-mixing_num = 2 # ablation
+mixing_num = 3 # ablation
 
 def find_label_idx(sent, prefix):
     main_str = ",".join(map(str, sent))
@@ -214,8 +214,9 @@ class MLPforBiaffine(nn.Module):
         )
         nn.init.kaiming_normal_(self.mlp[1].weight, mode='fan_in', nonlinearity='relu')
         nn.init.zeros_(self.mlp[1].bias)
-        nn.init.kaiming_normal_(self.mlp[3].weight, mode='fan_in', nonlinearity='linear')
-        nn.init.zeros_(self.mlp[3].bias)
+        self.relu = nn.ReLU()
+        # nn.init.kaiming_normal_(self.mlp[3].weight, mode='fan_in', nonlinearity='linear')
+        # nn.init.zeros_(self.mlp[3].bias)
     
     def forward(self, inp):
         x = self.mlp(inp)
@@ -255,52 +256,43 @@ class BiaffineAttention(nn.Module):
     def __init__(self, out_dim, input_dim, n_head = 1, type="default"):
         super(BiaffineAttention, self).__init__()
         self.input_dim = input_dim
+        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256) for _ in range(mixing_num)])
+        self.dep_to_parent_k = nn.Linear(mixing_num * 256, 2 * input_dim, bias=False)
+        self.dep_to_child_k = nn.Linear(mixing_num * 256, 2 * input_dim, bias=False)
+
         self.type = type
         self.temperature = 1.0
         self.concat_dim = input_dim * 3
-        self.n_head = n_head
-        self.head_dim = out_dim
-        self.mlp1_in_dim = input_dim * 3
-        self.mlp1_out_dim = 2048
 
-        self.f_1 = MLPforBiaffine(self.mlp1_out_dim, self.mlp1_in_dim, 3072)  #3072->3072->2048
-        self.f_3 = MLPforBiaffine(self.mlp1_out_dim, self.mlp1_in_dim, 3072)
-        self.f_2 = MLPforBiaffine(1024, self.mlp1_out_dim, 2048)  #2048->2048->1024
-        self.f_4 = MLPforBiaffine(1024, self.mlp1_out_dim, 2048)
-        # self.f_2 = nn.Sequential(MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)
-        #     , MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head))
-        # self.f_4 = nn.Sequential(MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head)
-        #     , MLPforBiaffine(out_dim // self.n_head, 2048 // self.n_head, 4 * input_dim // self.n_head))
+        self.f_1 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)  #3072->3072->2048
+        self.f_3 = MLPforBiaffine(2 * input_dim, self.concat_dim, self.concat_dim)
+        self.b_1 = nn.Parameter(torch.rand(input_dim + 1, input_dim + 1))
+        self.b_2 = nn.Parameter(torch.rand(input_dim, input_dim))
 
-        self.pos_emb = PositionalEmbedding(1024)
-        self.pos_to_parent_k = nn.Linear(1024, self.mlp1_out_dim, bias=False)
-        self.pos_to_child_k = nn.Linear(1024, self.mlp1_out_dim, bias=False)
-        self.depth_embed = nn.ModuleList([torch.nn.Embedding(151, 256) for _ in range(mixing_num)])
-        self.dep_to_parent_k = nn.Linear(mixing_num * 256, self.mlp1_out_dim, bias=False)
-        self.dep_to_child_k = nn.Linear(mixing_num * 256, self.mlp1_out_dim, bias=False)
+        self.f_2 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)  #2048->2048->1024
+        self.f_4 = MLPforBiaffine(input_dim, 2 * input_dim, 2 * input_dim)
 
-        self.b_1 = nn.Parameter(torch.rand(self.head_dim, self.head_dim))
-        self.b_2 = nn.Parameter(torch.rand(self.head_dim, self.head_dim))
+        self.pos_emb = PositionalEmbedding(input_dim)
+        self.pos_to_parent_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
+        self.pos_to_child_k = nn.Linear(input_dim, 2 * input_dim, bias=False)
         
         if type == "default":
             self.softmax = nn.Softmax(dim=-1)
         elif type == "Multi":
-            self.root_representation = nn.Parameter(torch.Tensor(1, self.mlp1_in_dim))
+            self.root_representation = nn.Parameter(torch.Tensor(1, input_dim * 3))
             self.softmax = nn.Sigmoid()
+            nn.init.xavier_uniform_(self.root_representation)
         
         self.arc_softmax = nn.Softmax(dim=-1)
-        self.prob = nn.Linear(self.head_dim, 30)
-        if self.n_head != 1:
-            self.onet = nn.Linear(self.n_head, 1)
+        self.prob = nn.Linear(input_dim, 30)
         
-        for layer in [self.pos_to_parent_k, self.pos_to_child_k, self.dep_to_child_k, self.dep_to_parent_k]:
-            nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='linear')
-        nn.init.xavier_normal_(self.root_representation)
-        nn.init.kaiming_normal_(self.b_1, mode='fan_in', nonlinearity='linear')
-        nn.init.kaiming_normal_(self.b_2, mode='fan_in', nonlinearity='linear')
-        for embed_layer in self.depth_embed:
-            fan_in = nn.init._calculate_correct_fan(embed_layer.weight, 'fan_in')
-            nn.init.uniform_(embed_layer.weight, -np.sqrt(3 / fan_in), np.sqrt(3 / fan_in))
+        # for layer in [self.pos_to_parent_k, self.pos_to_child_k, self.dep_to_child_k, self.dep_to_parent_k]:
+        #     nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='linear')
+        # nn.init.kaiming_normal_(self.b_1, mode='fan_in', nonlinearity='linear')
+        # nn.init.kaiming_normal_(self.b_2, mode='fan_in', nonlinearity='linear')
+        # for embed_layer in self.depth_embed:
+        #     fan_in = nn.init._calculate_correct_fan(embed_layer.weight, 'fan_in')
+        #     nn.init.uniform_(embed_layer.weight, -np.sqrt(3 / fan_in), np.sqrt(3 / fan_in))
         
     def forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
         # attn_relpos = torch.stack([attn_relpos[0], attn_relpos[1], attn_relpos[2]]).to(attn_relpos.device)
@@ -337,84 +329,12 @@ class BiaffineAttention(nn.Module):
         child_position_info = self.pos_to_child_k(child_position)
         parent_hidden = parent_hidden + parent_pos_info + embed_biases_parent
         child_hidden = child_hidden + child_position_info + embed_biases_child
-        # parent_hidden = torch.cat((parent_hidden + parent_pos_info, embed_biases_parent), dim=-1)
-        # child_hidden = torch.cat((child_hidden + child_position_info, embed_biases_child), dim=-1)
 
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        if self.head_dim == 1024:
-            logits = torch.einsum('bijd,dd,bijd->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
-            square = torch.einsum('bijn,nn,bijn->bijn', parent_hidden, self.b_2, child_hidden)
-        else:
-            square = torch.einsum('bijn,nn,bijn->bijn', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
-            logits = torch.einsum('bijd,dd,bijd->bji', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
-        steps = torch.arange(1, time_step + 1, device=hidden.device)
-        scales = torch.sqrt(steps * 2).view(1, -1, 1)  # (1, time_step, 1)
-        row_mask = torch.tril(torch.ones_like(position))[:-1, :]
-        col_mask = torch.ones_like(position)[:-1, :] - row_mask
-        row_sum = (square * row_mask.unsqueeze(-1)).sum(dim=-2)
-        col_sum = (square * col_mask.unsqueeze(-1)).sum(dim=-3)[:, 1:, :]
-        row_col_sum = row_sum + col_sum
-        arc_num_scores = row_col_sum / scales   # b*l*n
-        arc_num_logits = self.prob(arc_num_scores)
-        arc_num_prob = self.arc_softmax(arc_num_logits)
-        scores = self.softmax(logits)
-        return scores, logits, arc_num_prob, arc_num_logits
-
-    def multihead_forward(self, hidden, attn_relpos): # i*d -> j*i (j = i + 1)
-        batchsize = hidden.shape[0]
-        child_hidden = self.f_3(hidden) # b*i*d
-        if self.type == "Multi":
-            repeat_shape = [1]*len(hidden.shape)
-            repeat_shape[0] = batchsize
-            root_tokens = self.root_representation.repeat(*repeat_shape)
-            # hidden = torch.cat((root_tokens, hidden), dim=1)
-            parent_hidden = torch.cat((root_tokens, child_hidden), dim=1)
-        # parent_hidden = self.f_1(hidden)
-        time_step = parent_hidden.shape[1] - 1 # time vary position embedding
-        parent_hidden = parent_hidden.unsqueeze(1).repeat(1, time_step, 1, 1)    # b*i*j*d
-        child_hidden = child_hidden.unsqueeze(1).repeat(1, time_step + 1, 1, 1).permute(0, 2, 1, 3)
-        attn_relpos = torch.clip(attn_relpos, 0, 150).long()
-        child_relpos = attn_relpos.clone()
-        for i in range(len(attn_relpos)): 
-            child_relpos[i, :] = F.pad(child_relpos[i, :].permute(0, 2, 1)[:, 1:, :], (1, 0))   # b*i*j
-        embed_tuple_parent = [self.depth_embed[i](attn_relpos[i]) for i in range(len(attn_relpos))]
-        embed_tuple_child = [self.depth_embed[i](child_relpos[i]) for i in range(len(child_relpos))]
-        embed_biases_parent = torch.cat(embed_tuple_parent, dim=-1)   # b*i*j*d
-        embed_biases_child = torch.cat(embed_tuple_child, dim=-1)
-        embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
-        embed_biases_child = self.dep_to_child_k(embed_biases_child)
-        position = torch.arange(time_step + 1, device=hidden.device).unsqueeze(1) - torch.arange(time_step + 1, device=hidden.device)
-        child_position = F.pad(torch.triu(position.T)[:, :-1], (1,0))[:-1, :]
-        parent_position = torch.tril(position)[1:, :]
-        parent_position = (torch.stack([self.pos_emb(pos) for pos in parent_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
-        child_position = (torch.stack([self.pos_emb(pos) for pos in child_position])).permute(2, 0, 1, 3).repeat(batchsize, 1, 1, 1)
-        parent_pos_info = self.pos_to_parent_k(parent_position)
-        child_position_info = self.pos_to_child_k(child_position)
-
-        new_parent_shape = parent_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)
-        new_child_shape = child_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)
-        parent_hidden = parent_hidden.view(new_parent_shape)
-        child_hidden = child_hidden.view(new_child_shape)
-
-        parent_pos = (parent_pos_info + embed_biases_parent).unsqueeze(-2)
-        parent_pos_head = parent_pos.expand(-1, -1, -1, self.n_head, -1) 
-        parent_hidden = torch.cat((parent_hidden, parent_pos_head), dim=-1)
-        child_pos = (child_position_info + embed_biases_child).unsqueeze(-2)
-        child_pos_head = child_pos.expand(-1, -1, -1, self.n_head, -1) 
-        child_hidden = torch.cat((child_hidden, child_pos_head), dim=-1)
-
-        parent_hidden = self.f_2(parent_hidden)
-        child_hidden = self.f_4(child_hidden)
-
-        # square = torch.einsum('bijnd,dd,bijnd->bijd', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
-        # logits = torch.einsum('bijnd,dd,bijnd->bjin', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
-        square = torch.einsum('bijnd,dd,bijnd->bijd', parent_hidden, self.b_2, child_hidden)
-        logits = torch.einsum('bijnd,dd,bijnd->bjin', parent_hidden, self.b_1, child_hidden)
-        if self.n_head != 1:
-            logits = self.onet(logits)
-        logits = logits.squeeze(-1)
+        logits = torch.einsum('bijd,dd,bijd->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
+        square = torch.einsum('bijn,nn,bijn->bijn', parent_hidden, self.b_2[:1024,:1024], child_hidden)
         steps = torch.arange(1, time_step + 1, device=hidden.device)
         scales = torch.sqrt(steps * 2).view(1, -1, 1)  # (1, time_step, 1)
         row_mask = torch.tril(torch.ones_like(position))[:-1, :]
@@ -463,75 +383,8 @@ class BiaffineAttention(nn.Module):
         parent_hidden = self.f_2(parent_hidden)
         child_hidden = self.f_4(child_hidden)
 
-        if self.head_dim == 1024:
-            scores = torch.einsum('bjd,dd,bid->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
-            arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2, child_hidden)
-        else:
-            scores = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
-            arc_num_scores = torch.einsum('bin, nn, bjn->bijn', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
-        # scores = torch.zeros(batchsize, parent_hidden.shape[1], child_hidden.shape[1])
-        # scores[:, -1:, :] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden[:,-1:,:], (0, 1)), self.b_1, F.pad(child_hidden, (0, 1)))
-        # scores[:, :, -1:] = torch.einsum('bjd,dd,bid->bji', F.pad(parent_hidden, (0, 1)), self.b_1, F.pad(child_hidden[:,-1:,:], (0, 1)))
-        scores = self.softmax(scores)
-        # arc_num_scores = (torch.einsum('bn, nn, bjn->bjn', parent_hidden[:,-1,:], self.b_2, child_hidden[:,:-1,:]).sum(dim=-2) + torch.einsum('bin, nn, bn->bin', parent_hidden, self.b_2, child_hidden[:,-1,:]).sum(dim=-2)) / np.sqrt(2 * child_hidden.shape[1])
-        # arc_num_scores = torch.einsum('bin, bjn->bijn', parent_hidden, child_hidden)
-        arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
-        arc_num_logits = self.prob(arc_num_scores)
-        arc_num_prob = self.arc_softmax(arc_num_logits)
-        return scores, arc_num_prob, arc_num_logits
-
-    def multihead_inference(self, hidden, step_attn_relpos):
-        batchsize = hidden.shape[0]
-        child_hidden = self.f_3(hidden)
-        if self.type == "Multi":
-            repeat_shape = [1]*len(hidden.shape)
-            repeat_shape[0] = batchsize
-            root_tokens = self.root_representation.repeat(*repeat_shape)
-            # hidden = torch.cat((root_tokens, hidden), dim=1)
-            parent_hidden = torch.cat((root_tokens, child_hidden), dim=1)
-        # parent_hidden = self.f_1(hidden)
-
-        step_attn_relpos = torch.clip(step_attn_relpos, 0, 150).long()
-        child_relpos = F.pad(step_attn_relpos[:, :, 1:], (0,1))
-        step_attn_relpos = F.pad(step_attn_relpos, (0,1))
-        embed_tuple_parent = [self.depth_embed[i](step_attn_relpos[i]) for i in range(len(step_attn_relpos))]
-        embed_tuple_child = [self.depth_embed[i](child_relpos[i]) for i in range(len(child_relpos))]
-        embed_biases_parent = torch.cat(embed_tuple_parent, dim=-1)
-        embed_biases_child = torch.cat(embed_tuple_child, dim=-1)
-        embed_biases_parent = self.dep_to_parent_k(embed_biases_parent)
-        embed_biases_child = self.dep_to_child_k(embed_biases_child)
-
-        parent_position = torch.arange(child_hidden.size(1), -1, -1.0, device=hidden.device).long()
-        parent_position = self.pos_emb(parent_position).permute(1, 0, 2).repeat(batchsize, 1, 1)
-        child_position = parent_position[:,1:,:]
-        parent_position_info = self.pos_to_parent_k(parent_position)
-        child_position_info = self.pos_to_child_k(child_position)
-        # parent_hidden = parent_hidden + parent_position_info + embed_biases_parent
-        # child_hidden = child_hidden + child_position_info + embed_biases_child
-
-        new_shape_p = parent_hidden.shape[:-1] + (self.n_head, self.mlp1_out_dim // self.n_head)  # [B, L+1, n_head, head_dim]
-        new_shape_c = child_hidden.shape[:-1]  + (self.n_head, self.mlp1_out_dim // self.n_head)  # [B, L,   n_head, head_dim]
-        parent_hidden = parent_hidden.view(new_shape_p)
-        child_hidden = child_hidden.view(new_shape_c)
-
-        parent_pos = (parent_position_info + embed_biases_parent).unsqueeze(-2)
-        parent_pos_head = parent_pos.expand(-1, -1, self.n_head, -1) 
-        parent_hidden = torch.cat((parent_hidden, parent_pos_head), dim=-1)
-        child_pos = (child_position_info + embed_biases_child).unsqueeze(-2)
-        child_pos_head = child_pos.expand(-1, -1, self.n_head, -1) 
-        child_hidden = torch.cat((child_hidden, child_pos_head), dim=-1)
-
-        parent_hidden = self.f_2(parent_hidden)
-        child_hidden = self.f_4(child_hidden)
-        
-        arc_num_scores = torch.einsum('bind, dd, bjnd->bijd', parent_hidden, self.b_2, child_hidden)
-        scores = torch.einsum('bjnd,dd,bind->bjin', parent_hidden, self.b_1, child_hidden)
-        # arc_num_scores = torch.einsum('bind, dd, bjnd->bijd', F.pad(parent_hidden, (0, 1), value=1), self.b_2, F.pad(child_hidden, (0, 1), value=1))
-        # scores = torch.einsum('bjnd,dd,bind->bjin', F.pad(parent_hidden, (0, 1), value=1), self.b_1, F.pad(child_hidden, (0, 1), value=1))
-        
-        if self.n_head != 1:
-            scores = self.onet(scores)
-        scores = scores.squeeze(-1)
+        scores = torch.einsum('bjd,dd,bid->bji', parent_hidden, self.b_1[:1024,:1024], child_hidden)
+        arc_num_scores = torch.einsum('bin, nn, bjn->bijn', parent_hidden, self.b_2[:1024,:1024], child_hidden)
         scores = self.softmax(scores)
         arc_num_scores = (arc_num_scores[:, -1, :-1].sum(dim=-2) + arc_num_scores[:, :, -1].sum(dim=-2)) / np.sqrt(2 * arc_num_scores.shape[-2])
         arc_num_logits = self.prob(arc_num_scores)

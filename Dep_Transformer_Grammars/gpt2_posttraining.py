@@ -17,7 +17,7 @@ import csv
 import copy
 from torch.nn import CrossEntropyLoss
 from train_graphLayer import load_data, load_multiarrow, predicate_alignment
-from model_bllip_dep import calculate_depth, dijkstra, BiaffineAttention
+from model_bllip_dep import calculate_depth, dijkstra, BiaffineAttention, dijkstra_heap
 from helping_utils.logger import configure_logger, get_logger
 logger = get_logger()
 
@@ -30,6 +30,18 @@ startofword_id = [0 for _ in range(len(vocab))]
 for k, v in vocab.items():
     if k.startswith("Ġ"):
         startofword_id[v] = 1
+
+def mysave(checkpoint, save_path):
+    try:
+        torch.save(checkpoint, save_path)
+    except Exception as e:
+        logger.info(f"fail to save the model")
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        try:
+            torch.save(checkpoint, save_path)
+        except:
+            logger.info(f"still fail to save the model")
 
 def synchronize_arrows(input_id):
     batch_sent_id = []
@@ -56,6 +68,7 @@ class GiLTGPT2Attention(GPT2Attention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.embed_k_net = torch.nn.Linear(256 * mixing_num, 1024)
+        torch.nn.init.trunc_normal_(self.embed_k_net.weight, 0, 0.02)
     
     def forward(
         self,
@@ -486,16 +499,20 @@ class GiLTGPT2LMHead(GPT2LMHeadModel):
                     continue
                 tmp_finished_word_idx = finished_word_idx
                 finished_word_idx = sent_index_to_id[i] # first token i - 1
-                depth = calculate_depth(graph[:finished_word_idx + 1, :finished_word_idx + 1])
+                newgraph = graph[:finished_word_idx + 1, :finished_word_idx + 1].tolist()
+                depth = calculate_depth(newgraph)
                 for id, depth_value in enumerate(depth[1:]):
                     sent_depth_relpos[i, id_to_index[id + 1]] = depth_value
-                for id, depth_value in enumerate(depth):
-                    sent_depth_relpos_for_pointer[finished_word_idx, id] = depth_value
-                distance = dijkstra(graph_distance[:finished_word_idx + 1, :finished_word_idx + 1], finished_word_idx)
+                sent_depth_relpos_for_pointer[finished_word_idx, :len(depth)] = depth[:]
+                # for id, depth_value in enumerate(depth):
+                #     sent_depth_relpos_for_pointer[finished_word_idx, id] = depth_value
+                newgraph = graph_distance[:finished_word_idx + 1, :finished_word_idx + 1].tolist()
+                distance = dijkstra_heap(newgraph, finished_word_idx)
                 for id, distance_value in enumerate(distance[1:]):
                     sent_distance_relpos[i, id_to_index[id + 1]] = distance_value
-                for id, distance_value in enumerate(distance):
-                    sent_distance_relpos_for_pointer[finished_word_idx, id] = distance_value
+                sent_distance_relpos_for_pointer[finished_word_idx, :len(distance)] = distance[:]
+                # for id, distance_value in enumerate(distance):
+                #     sent_distance_relpos_for_pointer[finished_word_idx, id] = distance_value
                 if finished_word_idx != tmp_finished_word_idx:
                     add_arc_idx = finished_word_idx
                     if left_sent_arrow[add_arc_idx - 1]:  #i <- j
@@ -643,7 +660,8 @@ class GiLTGPT2LMHead(GPT2LMHeadModel):
             cross_attentions=transformer_outputs.cross_attentions,
         )
 
-def eval(model, eval_data, is_GiLT=False, left_arrow=None, right_arrow=None, biaffine_model=None):
+def eval(model, eval_data, is_GiLT=False, left_arrow=None,
+        right_arrow=None, biaffine_model=None, llm_only=False):
     model.eval()
     if biaffine_model is not None:
         biaffine_model.eval()
@@ -657,6 +675,7 @@ def eval(model, eval_data, is_GiLT=False, left_arrow=None, right_arrow=None, bia
     topk_acc_num = 0
     label_num = 0
     cs_loss = torch.nn.CrossEntropyLoss(ignore_index=-1, reduction='none')
+    lm_loss = 0
     for idx, eval_ids in enumerate(eval_data):
         max_len = max([len(eval_id) for eval_id in eval_ids])
         sum_len = sum([len(eval_id) for eval_id in eval_ids])
@@ -674,55 +693,60 @@ def eval(model, eval_data, is_GiLT=False, left_arrow=None, right_arrow=None, bia
         else:
             eval_arrows = [left_arrow[idx], right_arrow[idx]]
             outputs, attn_relpos_for_pointer, sents_index_to_id = model(eval_inps, arrows=eval_arrows, output_hidden_states=True)
-            hidden_states = torch.cat([outputs.hidden_states[-2], outputs.hidden_states[13]], dim=-1)
-            emb = outputs.hidden_states[0]
-            batch_predicates_input = predicate_alignment(hidden_states, sents_index_to_id, emb)
+            if not llm_only:
+                hidden_states = torch.cat([outputs.hidden_states[-2], outputs.hidden_states[13]], dim=-1)
+                emb = outputs.hidden_states[0]
+                batch_predicates_input = predicate_alignment(hidden_states, sents_index_to_id, emb)
 
-            biaffine_loss = []
-            if [left_arrow[idx], right_arrow[idx]]:
-                for sent_index_to_id, predicates_input, sent_left_label, sent_right_label, attn_rel in zip(
-                    sents_index_to_id, batch_predicates_input, left_arrow[idx], right_arrow[idx], attn_relpos_for_pointer):
-                    max_word_length = max(sent_index_to_id)
-                    labels = torch.zeros(max_word_length + 1, max_word_length + 1)
-                    arc_num_labels = torch.zeros(max_word_length)
-                    for index, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
-                        labels[index + 1, right_label] = 1
-                        labels[left_label, index + 1] = 1
-                        arc_num_labels[index] = len(left_label) + len(right_label)
+                biaffine_loss = []
+                if [left_arrow[idx], right_arrow[idx]]:
+                    for sent_index_to_id, predicates_input, sent_left_label, sent_right_label, attn_rel in zip(
+                        sents_index_to_id, batch_predicates_input, left_arrow[idx], right_arrow[idx], attn_relpos_for_pointer):
+                        max_word_length = max(sent_index_to_id)
+                        labels = torch.zeros(max_word_length + 1, max_word_length + 1)
+                        arc_num_labels = torch.zeros(max_word_length)
+                        for index, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
+                            labels[index + 1, right_label] = 1
+                            labels[left_label, index + 1] = 1
+                            arc_num_labels[index] = len(left_label) + len(right_label)
 
-                    if predicates_input:
-                        labels = (labels[:,1:]).unsqueeze(0).to(device)
-                        arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
-                        scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
-                        loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
-                        biaffine_loss.append(loss)
+                        if predicates_input:
+                            labels = (labels[:,1:]).unsqueeze(0).to(device)
+                            arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
+                            scores, _, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
+                            loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                            biaffine_loss.append(loss)
 
-                        arc_num_prediction = torch.argmax(arc_prob, dim=-1)
-                        arc_scores = scores.clone()
-                        for index, (arc_pred, arc_true) in enumerate(zip(arc_num_prediction[0], arc_num_labels[0])):
-                            if arc_pred == arc_true:
-                                arc_acc += 1
-                            topk_infer_num += arc_pred
-                            temp_scores = arc_scores[:, :(index+2), :(index+1)]
-                            topk_values, topk_indices = torch.topk(temp_scores.flatten(), k=min(arc_pred, 2 * (index + 1)))
-                            rows = topk_indices // temp_scores.shape[2]
-                            cols = topk_indices % temp_scores.shape[2]
-                            arc_scores[:, :(index+2), :(index+1)] = 0
-                            for row, col in zip(rows, cols):
-                                if labels[0, row, col] == 1:
-                                    topk_acc_num += 1
-                            
-                        action_num += len(arc_num_labels[0])   
-                        label_nonzero = torch.nonzero(labels, as_tuple=False)
-                        label_num += len(label_nonzero)
-            loss = cs_loss(outputs.logits.permute(0,2,1), eval_tgts).sum() + torch.stack(biaffine_loss).sum()
+                            arc_num_prediction = torch.argmax(arc_prob, dim=-1)
+                            arc_scores = scores.clone()
+                            for index, (arc_pred, arc_true) in enumerate(zip(arc_num_prediction[0], arc_num_labels[0])):
+                                if arc_pred == arc_true:
+                                    arc_acc += 1
+                                topk_infer_num += arc_pred
+                                temp_scores = arc_scores[:, :(index+2), :(index+1)]
+                                topk_values, topk_indices = torch.topk(temp_scores.flatten(), k=min(arc_pred, 2 * (index + 1)))
+                                rows = topk_indices // temp_scores.shape[2]
+                                cols = topk_indices % temp_scores.shape[2]
+                                arc_scores[:, :(index+2), :(index+1)] = 0
+                                for row, col in zip(rows, cols):
+                                    if labels[0, row, col] == 1:
+                                        topk_acc_num += 1
+                                
+                            action_num += len(arc_num_labels[0])   
+                            label_nonzero = torch.nonzero(labels, as_tuple=False)
+                            label_num += len(label_nonzero)
+                loss = cs_loss(outputs.logits.permute(0,2,1), eval_tgts).sum() + torch.stack(biaffine_loss).sum()
+                lm_loss += cs_loss(outputs.logits.permute(0,2,1), eval_tgts).sum().item()
+            else:
+                loss = cs_loss(outputs.logits.permute(0,2,1), eval_tgts).sum()
+                lm_loss += loss.item()
         # index = [len(eval_idx) - 3 for eval_idx in eval_ids]
         # prediction = torch.argmax(outputs.logits, dim=-1)[torch.arange(len(eval_ids)), index]
         # acc_num = (prediction == eval_tgts[torch.arange(len(eval_ids)), index]).sum().item()
         total_num += sum_len
         total_loss += loss.item()
 
-    if topk_infer_num != 0 and is_GiLT:
+    if topk_infer_num != 0 and is_GiLT and not llm_only:
         topk_pre = topk_acc_num / topk_infer_num
         topk_recall = topk_acc_num / label_num
         if topk_pre == 0 or topk_recall == 0:
@@ -733,8 +757,10 @@ def eval(model, eval_data, is_GiLT=False, left_arrow=None, right_arrow=None, bia
         topk_f1 = 0
         topk_pre = 0
         topk_recall = 0
-    logger.info(f"topk pre {topk_pre:.4f}, topk rec {topk_recall:.4f}, topk f1 {topk_f1:.4f}")
-    logger.info(f"action num acc {arc_acc / action_num:.4f}")
+    if is_GiLT and not llm_only:
+        logger.info(f"language modeling ppl {np.exp(lm_loss / total_num):.4f}")
+        logger.info(f"topk pre {topk_pre:.4f}, topk rec {topk_recall:.4f}, topk f1 {topk_f1:.4f}")
+        logger.info(f"action num acc {arc_acc / action_num:.4f}")
     model.train()
     if biaffine_model is not None:
         biaffine_model.train()
@@ -767,31 +793,47 @@ if __name__ == "__main__":
     train_arrow_path = "../data_process/GPT2-tokenizer/BLLIP_GPT2_TRAIN_psd_multiarrow.txt"
     dev_arrow_path = "../data_process/GPT2-tokenizer/BLLIP_GPT2_DEV_psd_multiarrow.txt"
     test_arrow_path = "../data_process/GPT2-tokenizer/BLLIP_GPT2_TEST_psd_multiarrow.txt"
+    # model_path = "models/GiLT_gpt2_medium_post_4_checkpoint.pt"
+    model_path = None
 
-    train_data = load_data(train_path, batchsize=train_bz, seed=seed, shuffle=True, size="demo")
+    train_data = load_data(train_path, batchsize=train_bz, seed=seed, shuffle=True, size="large")
     test_data = load_data(test_path, batchsize=8, seed=seed, shuffle=False)
     dev_data = load_data(dev_path, batchsize=8, seed=seed, shuffle=False)
 
-    EPOCHS = 2
-    LEARNING_RATE = 5e-5    # 3e-5
+    EPOCHS = 3
+    LLM_LR = 3e-5    # 5e-5
+    LLM_EMBED_LR = 1.5e-4
+    BIAFFINE_LR = 1.5e-4
     WEIGHT_DECAY = 1e-4    # 1e-4
     total_steps = len(train_data) * EPOCHS // accumulate_step if is_GiLT else len(train_data) * EPOCHS
-    warmup_steps = 3000
+    warmup_steps = 5000
+    lm_warmup_steps = 2000
 
     tokenizer = GPT2Tokenizer.from_pretrained("/home/huangty/GPT2/medium355M")
     tokenizer.add_prefix_space = True
     if not is_GiLT:
         model = GPT2LMHeadModel.from_pretrained("/home/huangty/GPT2/medium355M") # output_hidden_states=True
+        small_lr_params = model.parameters()
     else:
         model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
+        # model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post_3.pt", map_location=device))
         biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
-        left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz, shuffle=True, seed=seed, size="demo")
+        # biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine_3.pt", map_location=device))
+        left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz, shuffle=True, seed=seed, size="large")
         left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=8, shuffle=False, seed=seed)
         left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=8, shuffle=False, seed=seed)
         biaffine_model = biaffine_model.to(device)
         biaffine_model.train()
-        biaffine_optimizer = torch.optim.AdamW(biaffine_model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-        biaffine_scheduler = create_scheduler(biaffine_optimizer, warmup_steps, total_steps)
+        small_lr_params = [para for para in model.parameters() if para.shape != (1024, mixing_num * 256)]
+        large_lr_params = [para for para in model.parameters() if para.shape == (1024, mixing_num * 256)] \
+                + list(biaffine_model.parameters())
+        lm_steps = 5000
+        lm_step = lm_steps * (accumulate_step if is_GiLT else 1)
+        llm_only = True
+        biaffine_optimizer = torch.optim.AdamW(biaffine_model.parameters(), lr=BIAFFINE_LR, weight_decay=WEIGHT_DECAY)
+        biaffine_scheduler = create_scheduler(biaffine_optimizer, warmup_steps, total_steps-lm_steps)
+        biaffine_optimizer2 = torch.optim.AdamW(large_lr_params, lr=LLM_EMBED_LR, weight_decay=WEIGHT_DECAY)
+        biaffine_scheduler2 = create_scheduler(biaffine_optimizer2, lm_warmup_steps, lm_steps)
     model = model.to(device)
     eos_string = tokenizer.eos_token
     bos_string = tokenizer.bos_token
@@ -801,22 +843,28 @@ if __name__ == "__main__":
     logger = get_logger()
     logger.info(f"Total steps: {total_steps}")
     logger.info(f"Warmup steps: {warmup_steps}")
-    logger.info(f"Learning rate: {LEARNING_RATE}")
+    logger.info(f"LLM Learning rate: {LLM_LR}")
+    if is_GiLT:
+        logger.info(f"LLM new embedding params learning rate: {LLM_EMBED_LR}")
+        logger.info(f"Biaffine params learning rate: {BIAFFINE_LR}")
     logger.info(f"Weight decay: {WEIGHT_DECAY}")
-    save_path = os.path.join("models/GiLT_gpt2_medium_post.pt")
-    biaffine_save_path = os.path.join("models/GiLT_gpt2_biaffine.pt")
+    save_path = os.path.join("models/GiLT_gpt2_medium_post_8_checkpoint.pt")
+    # biaffine_save_path = os.path.join("models/GiLT_gpt2_biaffine_4.pt")
 
     model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LLM_LR, weight_decay=WEIGHT_DECAY)
     scheduler = create_scheduler(optimizer, warmup_steps, total_steps)
     if is_GiLT:
+        scheduler = create_scheduler(optimizer, warmup_steps, total_steps-lm_steps)
+        optimizer2 = torch.optim.AdamW(small_lr_params, lr=LLM_LR, weight_decay=WEIGHT_DECAY)
+        scheduler2 = create_scheduler(optimizer2, lm_warmup_steps, lm_steps)
         optimizer.zero_grad()
         biaffine_optimizer.zero_grad()
     cs_loss = torch.nn.CrossEntropyLoss(ignore_index=-1, reduction='none')
     crit = torch.nn.BCELoss(reduction="none")
     crit2 = torch.nn.CrossEntropyLoss(reduction="none")
 
-    best_ppl = 1000000
+    best_ppl = 1e35
     best_test_ppl = 0
     step_count = 0
     sum_loss = 0.0
@@ -824,13 +872,40 @@ if __name__ == "__main__":
 
     log_step = 20 * (accumulate_step if is_GiLT else 1)
     eval_step = 500 * (accumulate_step if is_GiLT else 1)
+    checkpoint_step = 0
 
     early_stop_signal = 0
+
+    if model_path:
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint['model'])
+        checkpoint_step = checkpoint['step']
+        if is_GiLT:
+            biaffine_model.load_state_dict(checkpoint['biaffine_model'])
+            biaffine_optimizer.load_state_dict(checkpoint['biaffine_optimizer'])
+            biaffine_scheduler.load_state_dict(checkpoint['biaffine_scheduler'])
+            # biaffine_scheduler2.load_state_dict(checkpoint['biaffine_scheduler2'])
+            # scheduler2.load_state_dict(checkpoint['scheduler2'])
+            for state in biaffine_optimizer.state.values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        state[k] = v.cuda()
+        else:
+            biaffine_model = None
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        if torch.cuda.is_available():
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        state[k] = v.cuda()
+
     for epoch in range(EPOCHS):
-        if early_stop_signal >= 3:
-            break
         logger.info('=' * 30 + f"EPOCH {epoch + 1} started" + '=' * 30)
         for idx, train_ids in enumerate(train_data):
+            if step_count < checkpoint_step:
+                step_count += 1
+                continue
             max_len = max([len(train_id) for train_id in train_ids])
             sum_len = sum([len(train_id) for train_id in train_ids])
             train_inps = torch.ones((len(train_ids), max_len - 1), dtype=torch.long) * 0
@@ -849,32 +924,36 @@ if __name__ == "__main__":
             else:
                 train_arrows = [left_train_arrow[idx], right_train_arrow[idx]]
                 outputs, attn_relpos_for_pointer, sents_index_to_id = model(train_inps, arrows=train_arrows, output_hidden_states=True)
-                # import pdb;pdb.set_trace()
-                # out2 = model.generate(train_inps[:,:1], attn_relpos=torch.zeros(3,16,1,1).long(), use_cache=True, return_dict=True, output_hidden_states=True)
-                hidden_states = torch.cat([outputs.hidden_states[-2], outputs.hidden_states[13]], dim=-1)
-                emb = outputs.hidden_states[0]
-                batch_predicates_input = predicate_alignment(hidden_states, sents_index_to_id, emb)
+                if step_count < lm_step:
+                    loss = cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum(1).mean()
+                    total_loss = cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum()
+                else:
+                    # import pdb;pdb.set_trace()
+                    # out2 = model.generate(train_inps[:,:1], attn_relpos=torch.zeros(3,16,1,1).long(), use_cache=True, return_dict=True, output_hidden_states=True)
+                    hidden_states = torch.cat([outputs.hidden_states[-2], outputs.hidden_states[13]], dim=-1)
+                    emb = outputs.hidden_states[0]
+                    batch_predicates_input = predicate_alignment(hidden_states, sents_index_to_id, emb)
 
-                biaffine_loss = []
-                if [left_train_arrow[idx], right_train_arrow[idx]]:
-                    for sent_index_to_id, predicates_input, sent_left_label, sent_right_label, attn_rel in zip(
-                        sents_index_to_id, batch_predicates_input, left_train_arrow[idx], right_train_arrow[idx], attn_relpos_for_pointer):
-                        max_word_length = max(sent_index_to_id)
-                        labels = torch.zeros(max_word_length + 1, max_word_length + 1)
-                        arc_num_labels = torch.zeros(max_word_length)
-                        for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
-                            labels[idx + 1, right_label] = 1
-                            labels[left_label, idx + 1] = 1
-                            arc_num_labels[idx] = len(left_label) + len(right_label)
+                    biaffine_loss = []
+                    if [left_train_arrow[idx], right_train_arrow[idx]]:
+                        for sent_index_to_id, predicates_input, sent_left_label, sent_right_label, attn_rel in zip(
+                            sents_index_to_id, batch_predicates_input, left_train_arrow[idx], right_train_arrow[idx], attn_relpos_for_pointer):
+                            max_word_length = max(sent_index_to_id)
+                            labels = torch.zeros(max_word_length + 1, max_word_length + 1)
+                            arc_num_labels = torch.zeros(max_word_length)
+                            for idx, (left_label, right_label) in enumerate(zip(sent_left_label, sent_right_label)):
+                                labels[idx + 1, right_label] = 1
+                                labels[left_label, idx + 1] = 1
+                                arc_num_labels[idx] = len(left_label) + len(right_label)
 
-                        if predicates_input:
-                            labels = (labels[:,1:]).unsqueeze(0).to(device)
-                            arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
-                            scores, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
-                            loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
-                            biaffine_loss.append(loss)
-                loss = 1/6 * torch.stack(biaffine_loss).sum() + 5/6 * cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum()
-                total_loss = torch.stack(biaffine_loss).sum() + cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum()
+                            if predicates_input:
+                                labels = (labels[:,1:]).unsqueeze(0).to(device)
+                                arc_num_labels = arc_num_labels.unsqueeze(0).long().to(device)
+                                scores, _, arc_prob, arc_logits = biaffine_model(torch.stack(predicates_input).unsqueeze(0), attn_rel.unsqueeze(1))
+                                loss = crit(scores, labels).sum() + crit2(arc_logits.permute(0,2,1), arc_num_labels).sum()
+                                biaffine_loss.append(loss)
+                    loss = 2/7 * torch.stack(biaffine_loss).mean() + 5/7 * cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum(1).mean()
+                    total_loss = torch.stack(biaffine_loss).sum() + cs_loss(outputs.logits.permute(0,2,1), train_tgts).sum()
             # index = [len(train_idx) - 3 for train_idx in train_idxs]
             # loss = loss[torch.arange(len(train_idxs)), index].mean()
 
@@ -883,10 +962,18 @@ if __name__ == "__main__":
                 if (step_count + 1) % accumulate_step == 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
                     torch.nn.utils.clip_grad_norm_(biaffine_model.parameters(), 3.0)
-                    biaffine_optimizer.step()
-                    biaffine_scheduler.step()
-                    optimizer.step()
-                    scheduler.step()
+                    if step_count < lm_step:
+                        optimizer2.step()
+                        biaffine_optimizer2.step()
+                        biaffine_scheduler2.step()
+                        scheduler2.step()
+                        llm_only = True
+                    else:
+                        optimizer.step()
+                        biaffine_optimizer.step()
+                        biaffine_scheduler.step()
+                        scheduler.step()
+                        llm_only = False
                     optimizer.zero_grad()
                     biaffine_optimizer.zero_grad()
             else:
@@ -901,32 +988,54 @@ if __name__ == "__main__":
             step_count += 1
             if step_count % log_step == 0:
                 mean_loss = sum_loss / sum_words
-                logger.info(f"Epoch {epoch+1} Step {step_count} / {len(train_data) * EPOCHS}, LR {optimizer.param_groups[0]['lr']:.7f}, loss {mean_loss:.4f}, ppl {np.exp(mean_loss):.4f}")
+                logger.info(f"Epoch {epoch+1} Step {step_count} / {len(train_data) * EPOCHS}, "
+                    f"small LR {optimizer.param_groups[0]['lr']:.7f}, "
+                    f"large LR {biaffine_optimizer.param_groups[0]['lr']:.7f}, "
+                    f"loss {mean_loss:.4f}, "
+                    f"ppl {np.exp(mean_loss):.4f}")
                 sum_loss = 0.0
                 sum_words = 0
             
-            if step_count % eval_step == 0 or step_count == len(train_data) * EPOCHS:
+            if step_count % eval_step == 0 or step_count == len(train_data) * epoch:
                 # test on dev
                 if not is_GiLT:
                     dev_ppl = eval(model, dev_data, is_GiLT)
                 else:
-                    dev_ppl = eval(model, dev_data, is_GiLT, left_dev_arrow, right_dev_arrow, biaffine_model)
+                    dev_ppl = eval(model, dev_data, is_GiLT, left_dev_arrow, right_dev_arrow, biaffine_model, llm_only=llm_only)
                 logger.info(f"Dev PPL: {dev_ppl}")
                 if dev_ppl < best_ppl:
                     early_stop_signal = 0
-                    best_ppl = dev_ppl
+                    if step_count > lm_step:
+                        best_ppl = dev_ppl
                     if not is_GiLT:
                         test_ppl = eval(model, test_data, is_GiLT)
+                        checkpoint = {
+                            "model": model.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            "step": step_count,
+                        }
                     else:
-                        test_ppl = eval(model, test_data, is_GiLT, left_test_arrow, right_test_arrow, biaffine_model)
-                        torch.save(biaffine_model.state_dict(), biaffine_save_path)
+                        test_ppl = eval(model, test_data, is_GiLT, left_test_arrow, right_test_arrow, biaffine_model, llm_only=llm_only)
+                        checkpoint = {
+                            "model": model.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            # "scheduler2": scheduler2.state_dict(),
+                            "biaffine_model": biaffine_model.state_dict(),
+                            "biaffine_optimizer": biaffine_optimizer.state_dict(),
+                            "biaffine_scheduler": biaffine_scheduler.state_dict(),
+                            # "biaffine_scheduler2": biaffine_scheduler2.state_dict(),
+                            "step": step_count,
+                        }
+                        # mysave(biaffine_model.state_dict(), biaffine_save_path)
                     best_test_ppl = test_ppl
                     logger.info(f"Test PPL: {test_ppl}, best so far.")
-                    torch.save(model.state_dict(), save_path)
+                    mysave(checkpoint, save_path)
                 else:
                     early_stop_signal += 1
                 
-                if early_stop_signal >= 3:
+                if early_stop_signal >= 5:
                     break
     
     logger.info(f"Best PPL: {best_ppl}")

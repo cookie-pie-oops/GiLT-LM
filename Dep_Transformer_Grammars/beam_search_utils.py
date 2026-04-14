@@ -363,19 +363,15 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
     with torch.no_grad():
         counter = count()
         tokens = torch.LongTensor(encoded[:-1]).to(device).reshape(1, -1)
-        id_to_index = {}
-        for i in range(len(sent_index_to_id)):
-            if sent_index_to_id[i] != -1:
-                if sent_index_to_id[i] not in id_to_index:
-                    id_to_index[sent_index_to_id[i]] = [i]
-                else:
-                    id_to_index[sent_index_to_id[i]].append(i)
+        id_to_index = sent_index_to_id[:-1]
+        id_to_index[0] = 0
+        id_to_index = torch.LongTensor(id_to_index).to(device)
 
         graph_len = max(sent_index_to_id) + 1
         graph = torch.zeros((graph_len, graph_len))
         graph_distance = torch.zeros((graph_len, graph_len))
         degree_list = torch.zeros(graph_len)
-        father_tag = torch.zeros(graph_len - 1)
+        father_tag = None
         # arcbeam = BEAM(beamsize)
         arcbeam = []
         scores = [0.0]
@@ -393,8 +389,7 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
             temp_score = [tup[0] for tup in temp_beam]
             batch = len(arcbeam)
             mask_size = i + 1
-            attn_relpos = torch.zeros(3, batch, 1, mask_size).long()
-            attn_relpos_for_pointer = torch.zeros(3, batch, max(sent_index_to_id[i], 0) + 1).long()
+            attn_relpos_for_pointer = torch.zeros(3, batch, max(sent_index_to_id[i], 0) + 1).long().to(device)
             degree_index, depth_index, distance_index = 0, 1, 2
             attn_relpos_for_pointer[depth_index, :, 0] = 1 # root always depth 1
             length = max(sent_index_to_id[i], 0) + 1
@@ -483,7 +478,7 @@ def GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word
                         graph_distance[topkcols+1, topkrows] = 1
                         degree_list[topkrows] += 10 #10
                         degree_list[topkcols+1] += 1
-                        father_tag[topkcols] = 1
+                        # father_tag[topkcols] = 1
                         graphinfo = Graphinfo.from_existing(degree_list, graph_distance, graph, father_tag)
                         # next_candidates.append((new_score, graphinfo, cache_k, cache_v, step_hiddens))
                         next_arcbeam.append((new_score, graphinfo, past_kv, None, step_hiddens))

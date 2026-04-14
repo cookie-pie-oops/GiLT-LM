@@ -116,7 +116,7 @@ def eval(model, eval_data, tokenizer, eos_string, downstreamtask, write_file=Fal
         out_metric["spearman"] = spearman
 
     if write_file:
-        fw = open(f"outputs/GiLT_test_{downstreamtask}.tsv", 'w')
+        fw = open(f"outputs/GiLT_test_{downstreamtask}_1226.tsv", 'w')
         writer = csv.writer(fw, delimiter="\t")
         writer.writerows(head_data)
     model.train()
@@ -165,14 +165,18 @@ if __name__ == "__main__":
         model = GPT2LMHeadModel.from_pretrained("/home/huangty/GPT2/medium355M") # output_hidden_states=True
         model.load_state_dict(torch.load('models/gpt2_medium_post.pt', map_location=device))
     else:
-        biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
         left_train_arrow, right_train_arrow = load_multiarrow(train_arrow_path, batchsize=train_bz_dict[downstreamtask], shuffle=True, seed=seed)
         left_dev_arrow, right_dev_arrow = load_multiarrow(dev_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
         left_test_arrow, right_test_arrow = load_multiarrow(test_arrow_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
         model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
-        model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post.pt", map_location=device))
+        # model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post.pt", map_location=device))
         biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
-        biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
+        checkpoint = torch.load("models/GiLT_gpt2_medium_post_8_checkpoint.pt", map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        biaffine_model.load_state_dict(checkpoint["biaffine_model"])
+        del checkpoint
+        torch.cuda.empty_cache()
+        # biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
         biaffine_model = biaffine_model.to(device)
         biaffine_model.train()
         biaffine_optimizer = AdamW(biaffine_model.parameters(), lr=LEARNING_RATE)
@@ -186,8 +190,8 @@ if __name__ == "__main__":
         sts_dev_path = "../data_process/STS/STS_DEV_score.txt"
         sts_test_path = "../data_process/STS/STS_TEST_score.txt"
         train_sts_score = load_STS_score(sts_train_path, batchsize=train_bz_dict[downstreamtask], shuffle=True, seed=seed)
-        dev_sts_score = load_STS_score(sts_dev_path, batchsize=8, shuffle=False, seed=seed)
-        test_sts_score = load_STS_score(sts_test_path, batchsize=8, shuffle=False, seed=seed)
+        dev_sts_score = load_STS_score(sts_dev_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
+        test_sts_score = load_STS_score(sts_test_path, batchsize=eval_batch_size, shuffle=False, seed=seed)
         model.STS = torch.nn.Linear(1024, 1)
 
     model = model.to(device)
@@ -276,7 +280,7 @@ if __name__ == "__main__":
                         test_metric_dict = eval(model, test_data, tokenizer, eos_string, downstreamtask, True, eval_score=test_sts_score, arrows=[left_test_arrow, right_test_arrow])
                     for key, value in test_metric_dict.items():
                         logger.info(f"Test {key}: {value}")
-                    torch.save(model.state_dict(), os.path.join(f"models/GiLT_gpt2_medium_{downstreamtask}.pt"))
+                    torch.save(model.state_dict(), os.path.join(f"models/GiLT_gpt2_medium_{downstreamtask}_1226.pt"))
     
     logger.info(f"Best metric: {best_metric}")
     for key, value in test_metric_dict.items():

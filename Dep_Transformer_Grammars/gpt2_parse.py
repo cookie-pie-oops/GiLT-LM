@@ -28,6 +28,8 @@ def load_data(filename, batchsize=8):
 
     with open(filename, 'r') as f:
         sents = [line.strip() for line in f.readlines()]
+        # sents = [sent.split(',') for sent in sents]
+        # sents = [[int(word) for word in sent] for sent in sents]
     
     if batchsize == -1:
         return [sents]
@@ -49,9 +51,10 @@ if __name__ == "__main__":
     tokenizer = GPT2Tokenizer.from_pretrained("/home/huangty/GPT2/medium355M")
     tokenizer.add_prefix_space = True
     model = GiLTGPT2LMHead.from_pretrained("/home/huangty/GPT2/medium355M")
-    model.load_state_dict(torch.load("models/GiLT_gpt2_medium_post.pt", map_location=device))
+    checkpoint = torch.load("models/GiLT_gpt2_medium_post_8_checkpoint.pt", map_location=device)
+    model.load_state_dict(checkpoint["model"])
     biaffine_model = BiaffineAttention(4096, 1024, type="Multi")
-    biaffine_model.load_state_dict(torch.load("models/GiLT_gpt2_biaffine.pt", map_location=device))
+    biaffine_model.load_state_dict(checkpoint["biaffine_model"])
     test_data = load_data(args.parse_file_path, batchsize=1)
     configure_logger("logs/GiLT_gpt2_parse.log")
 
@@ -70,9 +73,12 @@ if __name__ == "__main__":
 
     bos_eos_id = 50256
     fw = open(args.save_arrow_path, 'w')
+    total_ppl = 0
+    total_len = 0
     for idx in tqdm(range(len(test_data))):
         text = test_data[idx][0]
         encoded = [bos_eos_id] + tokenizer.encode(tokenizer.decode(tokenizer.encode(text)).strip()) + [bos_eos_id]
+        # encoded = test_data[idx][0]
         start_predict_new_word = [1 if startofword_id[encoded[i + 1]] else 0 for i in range(len(encoded) - 1)]
         sent_index_to_id = synchronize_arrows([encoded])[0]
         scores, beam_with_graph = GiLT_GPT2_update_beam(encoded, model, biaffine_model, start_predict_new_word,
@@ -80,3 +86,10 @@ if __name__ == "__main__":
         best_graph = get_best_graph(beam_with_graph)
         arrow_dict = get_action_from_graph(best_graph)
         fw.write(json.dumps(arrow_dict, ensure_ascii=False)+'\n')
+
+        total_ppl += scores[-1]
+        total_len += len(encoded) - 1
+        if (idx + 1) % 20 == 0:
+            logger.info(f"sentence {idx + 1} / {len(test_data)} ppl: {np.exp(scores[-1] / (len(encoded) - 1))}")
+            logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
+    logger.info(f"test ppl: {np.exp(total_ppl / total_len)}")
