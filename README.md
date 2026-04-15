@@ -55,9 +55,12 @@ To obtain the SG score and BLiMP score. You should download the test set first a
 
 ## Finetune
 
-We use `./src/scripts/gpt2_post.sh` to start post-training leading to GiLT-GPT2 & Post_GPT2.
+We use `./src/scripts/gpt2_post.sh` to start post-training leading to GiLT-GPT2 & Post-GPT2.
+
 To finetune GiLT-GPT2 on the downstream task, we need parse the dataset with `./src/scripts/gpt2_parse.sh`
-Since we use the GPT2 tokenizer, we have added the prompt format of RTE, SST2, STS-B and MRPC in the `./src/gpt2_finetune.py`
+
+Since we use the GPT2 tokenizer, we have added the prompt format of RTE, SST2, STS-B and MRPC in the `./src/gpt2_finetune.py`, you can strightly finetune Post-GPT2 with a trained model file and GiLT-GPT2 with two extra parsed edge label files.
+
 To obatin the score of GLUE tasks, our scripts will generate the answer of given input test csv, you should upload it to the GLUE.
+
 To test the SG and BLiMP of GiLT-GPT2, you should check the annotated code in `./src/SG_test_graphlayer.py` and `./src/BLiMP_graphlayer.py`
-<!-- post train to obatin GiLT-GPT2, then parse the downstream dataset, then finetune, the output will save as a file, upload it to the GLUE network and get score -->
