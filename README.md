@@ -11,8 +11,7 @@ You can follow `./environments.yml` for reference environment.
 
 ## Data process
 
-We split the BLLIP corpus into train, dev and test sets with `./data_process/BLLIP_process.py` following the DTG as well as TG.
-<!-- arxiv link -->
+We split the BLLIP corpus into train, dev and test sets with `./data_process/BLLIP_process.py` following the [DTG](https://github.com/zhaoyd1/Dep_Transformer_Grammars) as well as [TG](https://github.com/google-deepmind/transformer_grammars).
 
 If you have a SDP graph, transfer it into the format given below in a json file:
 
