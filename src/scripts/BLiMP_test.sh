@@ -13,7 +13,6 @@
 #     --model_path models/GiLT_large_psd_4_3mixing_easydepth_0921v1.pt \
 #     --beamsize 300 \
 #     --scorebeamsize 5 \
-#     --parse_file ../data_process/RTE/RTE_TRAIN_psd_multiarrow_parse.txt \
 #     --finetuneset rte
 
 python SG_test_graphlayer.py \

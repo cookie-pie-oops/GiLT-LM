@@ -69,7 +69,6 @@ python BLLIP_beam_search.py \
     --model_path models/$MODEL_PATH.pt \
     --beamsize 300 \
     --scorebeamsize 5 \
-    --parse_file ../data_process/RTE/RTE_TRAIN_psd_multiarrow_parse.txt \
     --finetuneset rte
 
 python SG_test_graphlayer.py \
