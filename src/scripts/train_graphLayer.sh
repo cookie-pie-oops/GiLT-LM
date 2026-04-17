@@ -28,8 +28,8 @@ python train_graphLayer.py \
     --biaffine_head 1 \
     --biaffine_out_dim 1024 \
     --loss_alpha 1.0 \
-    --loss_beta 0.4 \
-    --loss_gamma 0.4 \
+    --loss_beta 0.2 \
+    --loss_gamma 0.2 \
     --attn_mask graphlayer \
     --sentence_level \
     --emb_lr_multiplier 1.0 \

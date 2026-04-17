@@ -841,8 +841,9 @@ def main(args):
             raw_loss = ret
             if args.finetune is None: # non_biaffine
                 raw_biaffine_loss = torch.stack(biaffine_loss)
-                loss = (args.loss_alpha * raw_loss.sum() + raw_biaffine_loss.sum()) / (total_length
-                    * (args.loss_alpha + args.loss_beta + args.loss_gamma))
+                scale = (args.loss_beta + args.loss_gamma) / 2
+                loss = 2 * (args.loss_alpha/(args.loss_alpha + scale) * raw_loss.mean() + 
+                    2 / (1 + scale) * raw_biaffine_loss.mean())
             else:
                 loss = raw_loss.mean()
             train_loss += raw_loss.sum().item()
