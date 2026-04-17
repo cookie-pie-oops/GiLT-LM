@@ -2,8 +2,7 @@
 
 ## Introduction
 
-Code Repository for our ACL 2026 paper "GiLT: Augmenting Transformer Language Models with Dependency Graphs".
-<!-- arxiv link -->
+Code Repository for our ACL 2026 paper "GiLT: Augmenting Transformer Language Models with Dependency Graphs"([paper](https://arxiv.org/abs/2605.15562)).
 
 ## Environment
 
